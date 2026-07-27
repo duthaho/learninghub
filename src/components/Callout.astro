@@ -1,0 +1,64 @@
+---
+// Variants map to editorial roles:
+//   gotcha  — a mistake worth remembering (drawn from real review-queue misses)
+//   insight — the "aha" that makes a concept click
+//   note    — a useful aside
+interface Props {
+  type?: 'gotcha' | 'insight' | 'note';
+  title?: string;
+}
+const { type = 'note', title } = Astro.props;
+const meta = {
+  gotcha: { icon: '⚠', label: 'Gotcha' },
+  insight: { icon: '✦', label: 'Insight' },
+  note: { icon: '→', label: 'Note' },
+}[type];
+---
+
+<aside class={`callout callout-${type}`}>
+  <p class="callout-head">
+    <span class="callout-icon" aria-hidden="true">{meta.icon}</span>
+    <span class="callout-label">{title ?? meta.label}</span>
+  </p>
+  <div class="callout-body">
+    <slot />
+  </div>
+</aside>
+
+<style>
+  .callout {
+    margin: 2rem 0;
+    padding: 1.1rem 1.3rem;
+    border-radius: 12px;
+    border: 1px solid var(--line-strong);
+    background: var(--paper-raised);
+    position: relative;
+  }
+  .callout::before {
+    content: '';
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 4px;
+    border-radius: 12px 0 0 12px;
+    background: var(--tone);
+  }
+  .callout-gotcha  { --tone: #c2410c; }
+  .callout-insight { --tone: var(--accent); }
+  .callout-note    { --tone: #0f766e; }
+
+  .callout-head {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0 0 0.4rem;
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--tone);
+  }
+  .callout-icon { font-size: 0.95rem; }
+  .callout-body :global(p) { margin: 0.4rem 0; }
+  .callout-body :global(p:last-child) { margin-bottom: 0; }
+  .callout-body :global(p:first-child) { margin-top: 0; }
+</style>

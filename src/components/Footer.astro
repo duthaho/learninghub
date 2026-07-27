@@ -1,0 +1,31 @@
+---
+const year = new Date().getFullYear();
+---
+
+<footer class="site-footer">
+  <div class="wrap inner">
+    <p class="lede">
+      <span class="mark" aria-hidden="true">◆</span> learninghub —
+      backend systems, understood, not memorised.
+    </p>
+    <p class="fine">
+      Written in public from real study notes. © {year}. Built with Astro.
+    </p>
+  </div>
+</footer>
+
+<style>
+  .site-footer {
+    margin-top: 6rem;
+    border-top: 1px solid var(--line);
+    background: var(--paper-raised);
+  }
+  .inner { padding: 3rem 0; }
+  .lede {
+    font-family: var(--serif);
+    font-size: 1.15rem;
+    margin: 0 0 0.5rem;
+  }
+  .mark { color: var(--accent); }
+  .fine { color: var(--ink-faint); font-size: 0.9rem; margin: 0; }
+</style>

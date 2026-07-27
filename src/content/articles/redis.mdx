@@ -1,0 +1,204 @@
+---
+title: "Redis, from the ground up"
+subtitle: "One thread, held in memory — and why that single design choice explains almost everything else."
+description: "A mental-model-first tour of Redis: the single-threaded core, the data types as a design toolkit, and how expiration and eviction actually work."
+level: "Foundations · Beginner-friendly"
+accent: "#c0392b"
+readingTime: "14 min read"
+updated: 2026-07-27
+order: 1
+---
+
+import Callout from '../../components/Callout.astro';
+
+Most people meet Redis as "the fast key–value cache." That's true, but it's the
+least interesting thing about it — and it hides the one idea that makes the
+whole system click. Redis is an **in-memory data structure server that runs your
+commands one at a time, on a single thread.** Hold onto that sentence. Almost
+every strength, quirk, and footgun in Redis falls out of it.
+
+## The mental model: one thread, in memory
+
+A traditional database assumes its data lives on disk and that many queries run
+at once. Redis assumes the opposite: the dataset lives in **RAM**, and commands
+execute **serially** through a single-threaded event loop. It reads a command,
+runs it to completion, then reads the next one. There is no second command
+running "at the same time."
+
+That sounds like a limitation — one CPU core doing all the work? — but it buys
+something valuable: **every single command is atomic, for free.** No two commands
+can interleave, because there is no interleaving. When Redis executes `INCR`, it
+reads the number, adds one, and writes it back with zero chance of another client
+sneaking in between those steps.
+
+<Callout type="insight" title="Why INCR needs no lock">
+  In most languages, `counter += 1` across threads is a classic race: two threads
+  read `41`, both write `42`, and you lose an increment. In Redis, `INCR` is safe
+  under thousands of concurrent clients **without any client-side lock** — not
+  because Redis locks the key, but because the single thread runs each command to
+  completion before starting the next. Atomicity isn't added on top; it's a
+  property of the execution model.
+</Callout>
+
+The flip side is the cost you're now responsible for. Because one thread does
+everything, **a single slow command blocks every other client.** Ask Redis to
+run `KEYS *` on a million-key database, or `SMEMBERS` on a huge set, and the
+whole server stalls while that one O(n) command grinds through — every other
+request waits behind it. Redis is fast because its operations are usually O(1)
+or O(log n); hand it an O(n) command on a large value and you've turned your
+low-latency datastore into a stop-the-world pause.
+
+<Callout type="note" title="But isn't Redis multi-threaded now?">
+  Modern Redis does use extra threads — for network I/O, and background tasks
+  like snapshotting. But the part that matters here, **command execution**, is
+  still effectively serial on the main thread. The mental model holds: your data
+  operations happen one at a time.
+</Callout>
+
+So the two things to carry forward:
+
+- **Serial execution → single-command atomicity is free.**
+- **Serial execution → one heavy command hurts everyone.** Keep operations small and fast.
+
+## The data types as a design toolkit
+
+Here's the reframe that turns Redis from "a cache" into "a database you model
+with." Redis isn't a flat map of strings. It's a server of **data structures**,
+and choosing the right one is a modeling decision — the same kind you make when
+you pick a `HashMap` over a `List` in application code. The value's type decides
+which operations are cheap.
+
+| Type | Think of it as | Reach for it when |
+|------|----------------|-------------------|
+| **String** | A cell: text, a number, or bytes | Counters (`INCR`), flags, cached blobs, rate-limit tokens |
+| **Hash** | An object / row with fields | You store many fields of one entity and want to read/write them individually |
+| **List** | A linked list (fast ends) | Queues and stacks — push/pop at the head or tail in O(1) |
+| **Set** | A unique, unordered bag | Membership tests, tags, deduplication |
+| **Sorted Set** | A set where every member has a score | Leaderboards, priority queues, time-ordered ranges |
+
+The skill isn't memorising the commands — it's matching the **operation you need**
+to the type whose complexity makes that operation cheap. A leaderboard is the
+canonical example: you want "give me the top 10" and "what rank is this player?"
+to be fast as the set grows. A Sorted Set keeps members ordered by score, so
+those become efficient range and rank lookups instead of "fetch everything and
+sort."
+
+<Callout type="gotcha" title="Sorted Set lookups aren't O(1)">
+  It's tempting to think a Sorted Set gives you rank in constant time. It
+  doesn't. `ZRANK` is **O(log n)**, and range reads like `ZREVRANGE` are
+  **O(log n + M)** where M is how many elements you return. That's still
+  excellent — and far better than the alternative of storing scores in a Hash
+  and sorting yourself, which is **O(N log N)** to sort plus an **O(N) blocking
+  read** to pull every field. But "fast" here means *logarithmic*, not
+  *constant*. Know which one you're getting when you reason about latency.
+</Callout>
+
+### The anti-pattern: a blob in a string
+
+The most common misuse is serialising a whole object to JSON and stuffing it into
+a single String. It works, but you've thrown away the toolkit: to change one
+field you must read the entire blob, parse it, edit it, re-serialise, and write
+it all back. Model it as a **Hash** and you can update or read a single field
+directly, on the server, without moving the rest over the wire. Let the value's
+type do the work the type exists to do.
+
+## Expiration, eviction, and memory
+
+Redis lives in RAM, and RAM runs out. There are two completely different
+mechanisms for data leaving Redis, and conflating them is where a lot of
+production confusion comes from.
+
+**Expiration** is a *per-key deadline you set*. You say `SET session:42 ... EX 3600`
+and that key is scheduled to die in an hour. It's about correctness and freshness
+— the key is *supposed* to be temporary.
+
+**Eviction** is what happens *under memory pressure*. When Redis hits its
+`maxmemory` limit, it must free space to accept new writes, so it removes keys
+according to a policy — **whether or not those keys had an expiry set.** It's
+about survival, not correctness.
+
+<Callout type="insight" title="Two clocks, not one">
+  Expiry is a deadline; eviction is a bouncer at a full room. A key can be
+  evicted long before its TTL if memory fills up, and a key with no TTL at all
+  can still be evicted. Keeping these separate in your head prevents a whole
+  class of "but I set an expiry, why is it gone early?" (evicted) and "why is my
+  memory full of keys that should have expired?" (see below) confusion.
+</Callout>
+
+How does expiry actually remove keys? Two ways working together: **lazy**
+expiration checks whether a key is past its deadline *when something touches it*
+and deletes it then; **active** expiration is a background job that periodically
+samples keys with TTLs and clears the dead ones. Lazy alone would leak memory for
+keys nobody reads again; active alone would waste CPU scanning everything.
+Together they keep expiry cheap.
+
+### Choosing an eviction policy
+
+When `maxmemory` is reached, the policy decides who gets removed:
+
+| Policy | Behaviour | Good for |
+|--------|-----------|----------|
+| `noeviction` | Reject writes with an error | Data you cannot afford to silently lose |
+| `allkeys-lru` / `allkeys-lfu` | Evict any key, by least-recently / least-frequently used | A **pure cache** — everything is regenerable |
+| `volatile-lru` / `volatile-lfu` / `volatile-ttl` | Evict only keys **with a TTL** | A **mixed** store: cache entries expire, persistent keys stay |
+
+For a pure cache, reach for `allkeys-lru` or `allkeys-lfu` — every entry can be
+rebuilt from the source of truth, so evicting the coldest one is harmless and
+`allkeys-lfu` tends to keep genuinely hot keys better. For a **mixed workload**,
+where Redis holds both throwaway cache data and data you can't lose, a
+`volatile-*` policy protects the keys without a TTL by only ever evicting the
+ones you explicitly marked as temporary.
+
+<Callout type="gotcha" title="volatile-* with no expiring keys = false protection">
+  A `volatile-*` policy only evicts keys that have a TTL. Sounds safe — until
+  memory fills and there are *no* keys with a TTL to evict. Redis can't free
+  anything under the policy, so it behaves like `noeviction`: **new writes start
+  failing with OOM errors.** Picking `volatile-lru` isn't a guarantee you'll stay
+  under the limit; it's a promise about *which* keys are eligible. If nothing is
+  eligible, you get errors, not safety.
+</Callout>
+
+### A memory footgun: the unbounded set
+
+Sets are perfect for deduplication — "have I already processed this ID?" is a
+clean O(1) `SISMEMBER` check. But used naively for a stream of events, a dedup
+Set becomes one of the classic ways to take Redis down.
+
+<Callout type="gotcha" title="The unbounded dedup Set">
+  Add every seen ID to one Set forever and two things go wrong — and it's worth
+  being precise about which. First, **memory grows without bound**: the Set never
+  shrinks. Second — and this is the part people misdiagnose — the danger is
+  **not** the membership check. `SISMEMBER` is O(1) and stays cheap. The real
+  risk is the **O(n) operations on a now-enormous Set**: `SMEMBERS`, a `DEL` of
+  the whole key, or expiry of a giant key all walk every element and **block the
+  single thread** while they do. The fix is two-part: (1) bound the memory with
+  **time-bucketed keys that carry a TTL** (e.g. `seen:2026-07-27`) so old buckets
+  expire, and (2) if you only need approximate dedup, use a **HyperLogLog or a
+  Bloom filter** for near-constant memory. One fix caps growth; the other changes
+  what you're storing.
+</Callout>
+
+## Where this goes next
+
+Everything above is the load-bearing foundation. Once the single-threaded,
+in-memory model is second nature, the rest of Redis reads as consequences of it:
+
+- **Atomicity in depth** — pipelining batches round-trips but is *not* atomic;
+  `MULTI`/`EXEC` gives you atomic, non-interleaved execution; Lua scripts let you
+  run read-then-decide logic server-side, atomically.
+- **Caching patterns** — cache-aside vs write-through, and how to survive a cache
+  stampede when a hot key expires and a thousand requests miss at once.
+- **Persistence** — RDB snapshots vs the AOF command log, and the data-loss
+  window each one leaves you.
+- **HA & scale** — replication, Sentinel-driven failover, and how Cluster shards
+  keys across 16,384 hash slots.
+
+But notice how each of those already makes sense in light of the core idea. Atomic
+transactions matter *because* commands are serial. Persistence matters *because*
+the data lives in volatile RAM. Sharding matters *because* one thread can only do
+so much. Learn the mental model first, and the rest stops being a pile of features
+to memorise and becomes a system you can reason about.
+
+> If you can explain why `INCR` is safe without a lock, and why a giant Set is
+> dangerous, you already understand Redis better than most people who use it
+> daily.

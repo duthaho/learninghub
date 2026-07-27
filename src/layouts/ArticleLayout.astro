@@ -1,0 +1,165 @@
+---
+import BaseLayout from './BaseLayout.astro';
+import type { CollectionEntry } from 'astro:content';
+
+interface Props {
+  article: CollectionEntry<'articles'>;
+}
+const { article } = Astro.props;
+const { title, subtitle, description, level, accent, readingTime, updated } =
+  article.data;
+const base = import.meta.env.BASE_URL;
+
+const fmtDate = updated.toLocaleDateString('en-US', {
+  year: 'numeric',
+  month: 'long',
+  day: 'numeric',
+});
+---
+
+<BaseLayout title={`${title} — learninghub`} description={description} accent={accent}>
+  <article class="article">
+    <header class="article-head wrap">
+      <a class="back" href={`${base}#topics`}>← All topics</a>
+      <p class="eyebrow">{level}</p>
+      <h1>{title}</h1>
+      <p class="subtitle">{subtitle}</p>
+      <div class="meta">
+        <span>{readingTime}</span>
+        <span class="dot" aria-hidden="true">·</span>
+        <span>Updated {fmtDate}</span>
+      </div>
+    </header>
+
+    <div class="prose wrap">
+      <slot />
+    </div>
+  </article>
+
+  <style>
+    .article-head {
+      padding-top: 3rem;
+      max-width: 48rem;
+    }
+    .back {
+      display: inline-block;
+      font-size: 0.9rem;
+      color: var(--ink-faint);
+      text-decoration: none;
+      margin-bottom: 2rem;
+    }
+    .back:hover { color: var(--accent-ink); }
+    .article-head h1 {
+      font-size: clamp(2.2rem, 6vw, 3.4rem);
+      margin: 0.6rem 0 0;
+    }
+    .subtitle {
+      font-family: var(--serif);
+      font-weight: 380;
+      font-size: clamp(1.15rem, 3vw, 1.45rem);
+      line-height: 1.4;
+      color: var(--ink-soft);
+      margin: 0.9rem 0 0;
+    }
+    .meta {
+      display: flex;
+      gap: 0.6rem;
+      align-items: center;
+      margin-top: 1.5rem;
+      padding-top: 1.5rem;
+      border-top: 1px solid var(--line);
+      font-family: var(--mono);
+      font-size: 0.78rem;
+      color: var(--ink-faint);
+      letter-spacing: 0.03em;
+    }
+
+    /* ---------- Prose ---------- */
+    .prose {
+      max-width: 44rem;
+      margin-top: 2.5rem;
+    }
+    .prose :global(p),
+    .prose :global(ul),
+    .prose :global(ol) {
+      margin: 1.15rem 0;
+    }
+    .prose :global(h2) {
+      font-size: clamp(1.6rem, 4vw, 2rem);
+      margin: 3.2rem 0 0.4rem;
+      padding-top: 1.4rem;
+      border-top: 1px solid var(--line);
+    }
+    .prose :global(h2 .anchor),
+    .prose :global(h3 .anchor) { color: inherit; text-decoration: none; }
+    .prose :global(h3) {
+      font-size: 1.3rem;
+      margin: 2.2rem 0 0.4rem;
+    }
+    .prose :global(h2 + p),
+    .prose :global(h3 + p) { margin-top: 0.5rem; }
+    .prose :global(ul),
+    .prose :global(ol) { padding-left: 1.3rem; }
+    .prose :global(li) { margin: 0.4rem 0; }
+    .prose :global(li)::marker { color: var(--accent); }
+
+    .prose :global(strong) { font-weight: 600; color: var(--ink); }
+
+    .prose :global(blockquote) {
+      margin: 1.8rem 0;
+      padding: 0.2rem 0 0.2rem 1.4rem;
+      border-left: 3px solid var(--accent);
+      font-family: var(--serif);
+      font-size: 1.2rem;
+      font-style: italic;
+      color: var(--ink-soft);
+    }
+
+    /* Code blocks (shiki) */
+    .prose :global(pre) {
+      margin: 1.6rem 0;
+      padding: 1.1rem 1.2rem;
+      border-radius: 12px;
+      border: 1px solid var(--line-strong);
+      background: #fbf9f3 !important;
+      overflow-x: auto;
+      font-size: 0.86rem;
+      line-height: 1.6;
+    }
+    .prose :global(pre code) { background: none; border: none; padding: 0; white-space: pre; }
+
+    .prose :global(table) {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1.8rem 0;
+      font-size: 0.95rem;
+    }
+    .prose :global(th),
+    .prose :global(td) {
+      text-align: left;
+      padding: 0.6rem 0.8rem;
+      border-bottom: 1px solid var(--line);
+    }
+    .prose :global(th) {
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--ink-faint);
+    }
+    .prose :global(tr:last-child td) { border-bottom: none; }
+
+    .prose :global(hr) {
+      border: none;
+      border-top: 1px solid var(--line);
+      margin: 3rem 0;
+    }
+
+    /* Lead paragraph */
+    .prose :global(> p:first-of-type) {
+      font-size: 1.2rem;
+      line-height: 1.6;
+      color: var(--ink-soft);
+    }
+  </style>
+</BaseLayout>

@@ -1,0 +1,133 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import { getCollection } from 'astro:content';
+
+const articles = (await getCollection('articles', ({ data }) => !data.draft))
+  .sort((a, b) => a.data.order - b.data.order);
+const base = import.meta.env.BASE_URL;
+---
+
+<BaseLayout
+  title="learninghub — backend systems, understood not memorised"
+  description="In-depth, illustrated deep-dives on the backend systems every engineer leans on — Redis, MySQL, Elasticsearch and more. Written in public from real study notes."
+>
+  <section class="hero">
+    <div class="wrap">
+      <p class="eyebrow">Deep-dives on the systems you actually use</p>
+      <h1>
+        Backend systems,<br />
+        <em>understood</em> — not memorised.
+      </h1>
+      <p class="lede">
+        I learn one system at a time, to the point where I can make design
+        decisions and read other people's code. These are those notes, rewritten
+        as illustrated deep-dives — mental models first, gotchas included, no
+        hand-waving.
+      </p>
+      <div class="cta">
+        <a class="btn" href="#topics">Browse topics ↓</a>
+        <a class="ghost" href={`${base}about/`}>How this works</a>
+      </div>
+    </div>
+  </section>
+
+  <section id="topics" class="topics">
+    <div class="wrap">
+      <div class="section-head">
+        <h2>Topics</h2>
+        <p>{articles.length} deep-dive{articles.length === 1 ? '' : 's'}, more in progress.</p>
+      </div>
+
+      <ul class="grid" role="list">
+        {articles.map((a) => (
+          <li class="card" style={`--accent:${a.data.accent}`}>
+            <a href={`${base}${a.id}/`}>
+              <div class="card-top">
+                <span class="tag">{a.data.level}</span>
+                <span class="rt">{a.data.readingTime}</span>
+              </div>
+              <h3>{a.data.title}</h3>
+              <p class="sub">{a.data.subtitle}</p>
+              <p class="desc">{a.data.description}</p>
+              <span class="more">Read the deep-dive →</span>
+            </a>
+          </li>
+        ))}
+      </ul>
+    </div>
+  </section>
+
+  <style>
+    .hero { padding: clamp(3rem, 9vw, 6.5rem) 0 clamp(2.5rem, 6vw, 4rem); }
+    .hero h1 {
+      font-size: clamp(2.6rem, 8vw, 5rem);
+      margin: 1.2rem 0 0;
+      max-width: 16ch;
+    }
+    .hero h1 em { font-style: italic; color: var(--accent); }
+    .lede {
+      max-width: 40rem;
+      font-size: clamp(1.1rem, 2.5vw, 1.3rem);
+      line-height: 1.6;
+      color: var(--ink-soft);
+      margin: 1.6rem 0 2.2rem;
+    }
+    .cta { display: flex; gap: 1.4rem; align-items: center; flex-wrap: wrap; }
+    .ghost { color: var(--ink-soft); font-weight: 500; text-decoration: none; }
+    .ghost:hover { color: var(--accent-ink); }
+
+    .section-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 1rem;
+      margin-bottom: 1.8rem;
+      padding-bottom: 1rem;
+      border-bottom: 1px solid var(--line);
+    }
+    .section-head h2 { font-size: clamp(1.6rem, 4vw, 2.2rem); margin: 0; }
+    .section-head p { color: var(--ink-faint); margin: 0; font-size: 0.95rem; }
+
+    .grid {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(min(100%, 21rem), 1fr));
+      gap: 1.4rem;
+    }
+    .card {
+      background: var(--paper-raised);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      overflow: hidden;
+      transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+    }
+    .card:hover {
+      transform: translateY(-4px);
+      border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+      box-shadow: 0 18px 40px -24px color-mix(in srgb, var(--accent) 55%, transparent);
+    }
+    .card a { display: block; padding: 1.5rem; text-decoration: none; color: inherit; }
+    .card-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 1.1rem;
+    }
+    .rt { font-family: var(--mono); font-size: 0.72rem; color: var(--ink-faint); }
+    .card h3 {
+      font-size: 1.55rem;
+      margin: 0 0 0.3rem;
+    }
+    .card .sub {
+      font-family: var(--serif);
+      font-style: italic;
+      color: var(--accent-ink);
+      margin: 0 0 0.8rem;
+      font-size: 1rem;
+    }
+    .card .desc { color: var(--ink-soft); font-size: 0.95rem; margin: 0 0 1.2rem; }
+    .more { font-weight: 500; font-size: 0.9rem; color: var(--accent-ink); }
+  </style>
+</BaseLayout>
