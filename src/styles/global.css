@@ -5,7 +5,9 @@
  *  Light + dark themes, driven entirely by CSS variables.
  * ------------------------------------------------------------------ */
 
-@import '@fontsource-variable/fraunces/index.css';
+@import '@fontsource-variable/space-grotesk/index.css';
+@import '@fontsource-variable/source-serif-4/index.css';
+@import '@fontsource-variable/source-serif-4/wght-italic.css';
 @import '@fontsource-variable/inter/index.css';
 @import '@fontsource/jetbrains-mono/400.css';
 @import '@fontsource/jetbrains-mono/500.css';
@@ -30,8 +32,13 @@
   --accent-ink: color-mix(in srgb, var(--accent) 68%, var(--ink));
   --accent-line: color-mix(in srgb, var(--accent) 30%, var(--line));
 
-  /* Type */
-  --serif: 'Fraunces Variable', 'Fraunces', Georgia, 'Times New Roman', serif;
+  /* Type
+     --display : Space Grotesk — engineered geometric grotesk for headings/brand
+     --serif   : Source Serif 4 — real italics for subtitles & pull-quotes
+     --sans    : Inter — body copy + UI chrome
+     --mono    : JetBrains Mono — labels, spec lines, code */
+  --display: 'Space Grotesk Variable', 'Space Grotesk', system-ui, sans-serif;
+  --serif: 'Source Serif 4 Variable', 'Source Serif 4', Georgia, serif;
   --sans: 'Inter Variable', 'Inter', system-ui, -apple-system, sans-serif;
   --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
 
@@ -93,10 +100,10 @@ body {
 
 /* ---- Typography ---- */
 h1, h2, h3, h4 {
-  font-family: var(--serif);
+  font-family: var(--display);
   font-weight: 560;
-  line-height: 1.14;
-  letter-spacing: -0.015em;
+  line-height: 1.12;
+  letter-spacing: -0.02em;
   color: var(--ink);
   text-wrap: balance;
 }

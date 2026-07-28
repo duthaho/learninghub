@@ -32,11 +32,11 @@ const fmtDate = updated.toLocaleDateString('en-US', {
       <p class="eyebrow">{level}</p>
       <h1>{title}</h1>
       <p class="subtitle">{subtitle}</p>
-      <div class="meta">
-        <span>{readingTime}</span>
-        <span class="dot" aria-hidden="true">·</span>
-        <span>Updated {fmtDate}</span>
-      </div>
+      <dl class="specline" aria-label="Article metadata">
+        <div><dt>Read</dt><dd>{readingTime}</dd></div>
+        <div><dt>Updated</dt><dd>{fmtDate}</dd></div>
+        <div><dt>Status</dt><dd>Living document</dd></div>
+      </dl>
     </header>
 
     <div class="layout wrap">
@@ -143,17 +143,29 @@ const fmtDate = updated.toLocaleDateString('en-US', {
       color: var(--ink-soft);
       margin: 0.9rem 0 0;
     }
-    .meta {
+    /* RFC/spec-style metadata line */
+    .specline {
       display: flex;
-      gap: 0.6rem;
-      align-items: center;
-      margin-top: 1.5rem;
-      padding-top: 1.5rem;
+      flex-wrap: wrap;
+      gap: 0.6rem 2rem;
+      margin: 1.6rem 0 0;
+      padding-top: 1.4rem;
       border-top: 1px solid var(--line);
+    }
+    .specline div { display: flex; align-items: baseline; gap: 0.5rem; }
+    .specline dt {
+      font-family: var(--mono);
+      font-size: 0.66rem;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--ink-faint);
+      margin: 0;
+    }
+    .specline dd {
+      margin: 0;
       font-family: var(--mono);
       font-size: 0.78rem;
-      color: var(--ink-faint);
-      letter-spacing: 0.03em;
+      color: var(--ink-soft);
     }
 
     /* ---------- Layout: TOC rail + article body ---------- */
@@ -196,7 +208,9 @@ const fmtDate = updated.toLocaleDateString('en-US', {
       display: flex;
       flex-direction: column;
       gap: 0.15rem;
+      counter-reset: toc;
     }
+    .toc li { counter-increment: toc; }
     .toc a {
       display: block;
       padding: 0.32rem 0 0.32rem 0.9rem;
@@ -207,6 +221,15 @@ const fmtDate = updated.toLocaleDateString('en-US', {
       line-height: 1.35;
       transition: color 0.15s ease, border-color 0.15s ease;
     }
+    .toc a::before {
+      content: counter(toc, decimal-leading-zero);
+      margin-right: 0.5rem;
+      font-family: var(--mono);
+      font-size: 0.78em;
+      color: var(--ink-faint);
+      opacity: 0.7;
+    }
+    .toc a.active::before { color: var(--accent); opacity: 1; }
     .toc a:hover { color: var(--accent-ink); }
     .toc a.active {
       color: var(--accent-ink);
@@ -215,7 +238,7 @@ const fmtDate = updated.toLocaleDateString('en-US', {
     }
 
     /* ---------- Prose ---------- */
-    .prose { min-width: 0; }
+    .prose { min-width: 0; counter-reset: section; }
     .prose :global(p),
     .prose :global(ul),
     .prose :global(ol) {
@@ -223,10 +246,22 @@ const fmtDate = updated.toLocaleDateString('en-US', {
     }
     .prose :global(h2) {
       font-size: clamp(1.6rem, 4vw, 2.05rem);
-      margin: 3.4rem 0 0.4rem;
-      padding-top: 1.5rem;
+      margin: 3.6rem 0 0.4rem;
+      padding-top: 1.6rem;
       border-top: 1px solid var(--line);
       scroll-margin-top: 5.5rem;
+    }
+    /* Spec-style section marker: § 01, § 02 … in document order */
+    .prose :global(h2)::before {
+      counter-increment: section;
+      content: '§ ' counter(section, decimal-leading-zero);
+      display: block;
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      font-weight: 500;
+      letter-spacing: 0.16em;
+      color: var(--accent-ink);
+      margin-bottom: 0.55rem;
     }
     .prose :global(h3) {
       font-size: 1.3rem;
@@ -324,20 +359,12 @@ const fmtDate = updated.toLocaleDateString('en-US', {
       margin: 3rem 0;
     }
 
-    /* Lead paragraph with a drop cap */
+    /* Lead paragraph — enlarged for hierarchy, no drop cap (keeps the
+       technical/spec voice coherent). */
     .prose :global(> p:first-of-type) {
       font-size: 1.24rem;
-      line-height: 1.6;
+      line-height: 1.62;
       color: var(--ink-soft);
-    }
-    .prose :global(> p:first-of-type::first-letter) {
-      float: left;
-      font-family: var(--serif);
-      font-weight: 600;
-      font-size: 3.4rem;
-      line-height: 0.82;
-      padding: 0.25rem 0.6rem 0 0;
-      color: var(--accent-ink);
     }
   </style>
 </BaseLayout>

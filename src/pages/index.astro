@@ -89,7 +89,12 @@ const upcoming = [
       margin: 1.2rem 0 0;
       max-width: 16ch;
     }
-    .hero h1 em { font-style: italic; color: var(--accent); }
+    .hero h1 em {
+      font-family: var(--serif);
+      font-style: italic;
+      font-weight: 500;
+      color: var(--accent);
+    }
     .lede {
       max-width: 40rem;
       font-size: clamp(1.1rem, 2.5vw, 1.3rem);
@@ -162,12 +167,13 @@ const upcoming = [
 
     .idx {
       position: absolute;
-      top: 1.2rem;
+      top: 1.3rem;
       right: 1.3rem;
-      font-family: var(--serif);
-      font-size: 1.1rem;
+      font-family: var(--mono);
+      font-size: 0.8rem;
+      letter-spacing: 0.05em;
       color: var(--ink-faint);
-      opacity: 0.5;
+      opacity: 0.7;
     }
     .card-top {
       display: flex;

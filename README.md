@@ -4,8 +4,8 @@ An editorial deep-dive site built from personal learning notes — backend syste
 explained mental-model-first, with real "gotchas" pulled from a spaced-repetition
 review queue.
 
-Inspired by the format of [architecturenotes.co](https://architecturenotes.co):
-warm paper background, display serif headings, one accent colour per topic.
+An editorial reading experience: warm paper background, display serif headings,
+one accent colour per topic, light + dark themes.
 
 ## Stack
 
