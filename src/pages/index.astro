@@ -5,6 +5,12 @@ import { getCollection } from 'astro:content';
 const articles = (await getCollection('articles', ({ data }) => !data.draft))
   .sort((a, b) => a.data.order - b.data.order);
 const base = import.meta.env.BASE_URL;
+
+// Topics not written yet — shown as "coming soon" so the grid feels alive.
+const upcoming = [
+  { title: 'MySQL', subtitle: 'Indexes, transactions & the query planner', accent: '#00758f' },
+  { title: 'Elasticsearch', subtitle: 'Inverted indexes, relevance & aggregations', accent: '#0b7285' },
+];
 ---
 
 <BaseLayout
@@ -26,8 +32,14 @@ const base = import.meta.env.BASE_URL;
       </p>
       <div class="cta">
         <a class="btn" href="#topics">Browse topics ↓</a>
-        <a class="ghost" href={`${base}about/`}>How this works</a>
+        <a class="ghost" href={`${base}about/`}>How this works →</a>
       </div>
+
+      <ul class="principles" role="list">
+        <li><span aria-hidden="true">◆</span> Mental model first</li>
+        <li><span aria-hidden="true">◆</span> Taught to a rubric</li>
+        <li><span aria-hidden="true">◆</span> Real gotchas, not trivia</li>
+      </ul>
     </div>
   </section>
 
@@ -35,13 +47,14 @@ const base = import.meta.env.BASE_URL;
     <div class="wrap">
       <div class="section-head">
         <h2>Topics</h2>
-        <p>{articles.length} deep-dive{articles.length === 1 ? '' : 's'}, more in progress.</p>
+        <p>{articles.length} live · {upcoming.length} in progress</p>
       </div>
 
       <ul class="grid" role="list">
-        {articles.map((a) => (
+        {articles.map((a, i) => (
           <li class="card" style={`--accent:${a.data.accent}`}>
             <a href={`${base}${a.id}/`}>
+              <span class="idx">{String(i + 1).padStart(2, '0')}</span>
               <div class="card-top">
                 <span class="tag">{a.data.level}</span>
                 <span class="rt">{a.data.readingTime}</span>
@@ -51,6 +64,18 @@ const base = import.meta.env.BASE_URL;
               <p class="desc">{a.data.description}</p>
               <span class="more">Read the deep-dive →</span>
             </a>
+          </li>
+        ))}
+
+        {upcoming.map((u, i) => (
+          <li class="card card-soon" style={`--accent:${u.accent}`}>
+            <span class="idx">{String(articles.length + i + 1).padStart(2, '0')}</span>
+            <div class="card-top">
+              <span class="tag tag-soon">Coming soon</span>
+            </div>
+            <h3>{u.title}</h3>
+            <p class="sub">{u.subtitle}</p>
+            <span class="more soon">In the writing queue</span>
           </li>
         ))}
       </ul>
@@ -76,6 +101,20 @@ const base = import.meta.env.BASE_URL;
     .ghost { color: var(--ink-soft); font-weight: 500; text-decoration: none; }
     .ghost:hover { color: var(--accent-ink); }
 
+    .principles {
+      list-style: none;
+      margin: 2.6rem 0 0;
+      padding: 1.4rem 0 0;
+      border-top: 1px solid var(--line);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.8rem 2rem;
+      font-size: 0.92rem;
+      color: var(--ink-soft);
+    }
+    .principles li { display: flex; align-items: center; gap: 0.5rem; }
+    .principles span { color: var(--accent); font-size: 0.7rem; }
+
     .section-head {
       display: flex;
       align-items: baseline;
@@ -86,36 +125,59 @@ const base = import.meta.env.BASE_URL;
       border-bottom: 1px solid var(--line);
     }
     .section-head h2 { font-size: clamp(1.6rem, 4vw, 2.2rem); margin: 0; }
-    .section-head p { color: var(--ink-faint); margin: 0; font-size: 0.95rem; }
+    .section-head p { color: var(--ink-faint); margin: 0; font-size: 0.9rem; font-family: var(--mono); }
 
     .grid {
       list-style: none;
       margin: 0;
       padding: 0;
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(min(100%, 21rem), 1fr));
+      grid-template-columns: repeat(auto-fill, minmax(min(100%, 20rem), 1fr));
       gap: 1.4rem;
     }
     .card {
+      position: relative;
       background: var(--paper-raised);
       border: 1px solid var(--line);
       border-radius: 16px;
       overflow: hidden;
       transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
     }
+    /* accent bar along the top edge */
+    .card::before {
+      content: '';
+      position: absolute;
+      inset: 0 0 auto 0;
+      height: 3px;
+      background: var(--accent);
+      opacity: 0.85;
+    }
     .card:hover {
       transform: translateY(-4px);
-      border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
-      box-shadow: 0 18px 40px -24px color-mix(in srgb, var(--accent) 55%, transparent);
+      border-color: var(--accent-line);
+      box-shadow: 0 20px 44px -26px color-mix(in srgb, var(--accent) 60%, transparent);
     }
-    .card a { display: block; padding: 1.5rem; text-decoration: none; color: inherit; }
+    .card > a,
+    .card.card-soon { display: block; padding: 1.6rem; text-decoration: none; color: inherit; }
+
+    .idx {
+      position: absolute;
+      top: 1.2rem;
+      right: 1.3rem;
+      font-family: var(--serif);
+      font-size: 1.1rem;
+      color: var(--ink-faint);
+      opacity: 0.5;
+    }
     .card-top {
       display: flex;
       align-items: center;
       justify-content: space-between;
+      gap: 0.5rem;
       margin-bottom: 1.1rem;
+      padding-right: 2rem;
     }
-    .rt { font-family: var(--mono); font-size: 0.72rem; color: var(--ink-faint); }
+    .rt { font-family: var(--mono); font-size: 0.7rem; color: var(--ink-faint); }
     .card h3 {
       font-size: 1.55rem;
       margin: 0 0 0.3rem;
@@ -126,8 +188,20 @@ const base = import.meta.env.BASE_URL;
       color: var(--accent-ink);
       margin: 0 0 0.8rem;
       font-size: 1rem;
+      line-height: 1.35;
     }
     .card .desc { color: var(--ink-soft); font-size: 0.95rem; margin: 0 0 1.2rem; }
     .more { font-weight: 500; font-size: 0.9rem; color: var(--accent-ink); }
+
+    /* Coming-soon variant */
+    .card-soon { opacity: 0.82; }
+    .card-soon::before { opacity: 0.4; }
+    .card-soon:hover { transform: none; box-shadow: none; border-color: var(--line); }
+    .tag-soon {
+      color: var(--ink-faint);
+      background: var(--paper-sunk);
+      border-color: var(--line);
+    }
+    .more.soon { color: var(--ink-faint); font-family: var(--mono); font-size: 0.75rem; letter-spacing: 0.04em; }
   </style>
 </BaseLayout>

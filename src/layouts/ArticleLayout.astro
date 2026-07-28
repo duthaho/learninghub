@@ -2,14 +2,19 @@
 import BaseLayout from './BaseLayout.astro';
 import Support from '../components/Support.astro';
 import type { CollectionEntry } from 'astro:content';
+import type { MarkdownHeading } from 'astro';
 
 interface Props {
   article: CollectionEntry<'articles'>;
+  headings?: MarkdownHeading[];
 }
-const { article } = Astro.props;
+const { article, headings = [] } = Astro.props;
 const { title, subtitle, description, level, accent, readingTime, updated } =
   article.data;
 const base = import.meta.env.BASE_URL;
+
+// Only show H2s in the table of contents to keep it scannable.
+const toc = headings.filter((h) => h.depth === 2);
 
 const fmtDate = updated.toLocaleDateString('en-US', {
   year: 'numeric',
@@ -19,6 +24,8 @@ const fmtDate = updated.toLocaleDateString('en-US', {
 ---
 
 <BaseLayout title={`${title} — learninghub`} description={description} accent={accent} footerSupport={false}>
+  <div class="progress" aria-hidden="true"><span id="progress-bar"></span></div>
+
   <article class="article">
     <header class="article-head wrap">
       <a class="back" href={`${base}#topics`}>← All topics</a>
@@ -32,13 +39,86 @@ const fmtDate = updated.toLocaleDateString('en-US', {
       </div>
     </header>
 
-    <div class="prose wrap">
-      <slot />
-      <Support variant="block" />
+    <div class="layout wrap">
+      {toc.length > 0 && (
+        <aside class="toc" aria-label="Table of contents">
+          <div class="toc-inner">
+            <p class="toc-title">On this page</p>
+            <nav>
+              <ol>
+                {toc.map((h) => (
+                  <li><a href={`#${h.slug}`} data-toc={h.slug}>{h.text}</a></li>
+                ))}
+              </ol>
+            </nav>
+          </div>
+        </aside>
+      )}
+
+      <div class="prose">
+        <slot />
+        <Support variant="block" />
+      </div>
     </div>
   </article>
 
+  <script>
+    // Reading progress bar
+    const bar = document.getElementById('progress-bar');
+    const onScroll = () => {
+      const h = document.documentElement;
+      const max = h.scrollHeight - h.clientHeight;
+      const pct = max > 0 ? (h.scrollTop / max) * 100 : 0;
+      if (bar) bar.style.width = pct + '%';
+    };
+    document.addEventListener('scroll', onScroll, { passive: true });
+    onScroll();
+
+    // Scroll-spy: highlight the current section in the TOC
+    const links = Array.from(
+      document.querySelectorAll<HTMLAnchorElement>('[data-toc]')
+    );
+    if (links.length) {
+      const bySlug = new Map(links.map((l) => [l.dataset.toc, l]));
+      const heads = links
+        .map((l) => document.getElementById(l.dataset.toc || ''))
+        .filter((el): el is HTMLElement => !!el);
+
+      const setActive = (id: string) => {
+        links.forEach((l) => l.classList.toggle('active', l.dataset.toc === id));
+      };
+
+      const obs = new IntersectionObserver(
+        (entries) => {
+          const visible = entries
+            .filter((e) => e.isIntersecting)
+            .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top);
+          if (visible[0]) setActive(visible[0].target.id);
+        },
+        { rootMargin: '-10% 0px -70% 0px', threshold: 0 }
+      );
+      heads.forEach((h) => obs.observe(h));
+    }
+  </script>
+
   <style>
+    /* Reading progress */
+    .progress {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 3px;
+      z-index: 45;
+      background: transparent;
+    }
+    .progress span {
+      display: block;
+      height: 100%;
+      width: 0;
+      background: var(--accent);
+    }
+
     .article-head {
       padding-top: 3rem;
       max-width: 48rem;
@@ -76,28 +156,97 @@ const fmtDate = updated.toLocaleDateString('en-US', {
       letter-spacing: 0.03em;
     }
 
-    /* ---------- Prose ---------- */
-    .prose {
-      max-width: 44rem;
+    /* ---------- Layout: TOC rail + article body ---------- */
+    .layout {
       margin-top: 2.5rem;
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 2.5rem;
     }
+    @media (min-width: 60rem) {
+      .layout {
+        grid-template-columns: 15rem minmax(0, 44rem);
+        justify-content: center;
+        gap: 3.5rem;
+        align-items: start;
+      }
+    }
+
+    .toc { display: none; }
+    @media (min-width: 60rem) {
+      .toc { display: block; }
+      .toc-inner {
+        position: sticky;
+        top: 5.5rem;
+        padding-right: 0.5rem;
+      }
+    }
+    .toc-title {
+      font-family: var(--mono);
+      font-size: 0.68rem;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: var(--ink-faint);
+      margin: 0 0 0.9rem;
+    }
+    .toc ol {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 0.15rem;
+    }
+    .toc a {
+      display: block;
+      padding: 0.32rem 0 0.32rem 0.9rem;
+      border-left: 2px solid var(--line);
+      color: var(--ink-faint);
+      text-decoration: none;
+      font-size: 0.88rem;
+      line-height: 1.35;
+      transition: color 0.15s ease, border-color 0.15s ease;
+    }
+    .toc a:hover { color: var(--accent-ink); }
+    .toc a.active {
+      color: var(--accent-ink);
+      border-left-color: var(--accent);
+      font-weight: 500;
+    }
+
+    /* ---------- Prose ---------- */
+    .prose { min-width: 0; }
     .prose :global(p),
     .prose :global(ul),
     .prose :global(ol) {
-      margin: 1.15rem 0;
+      margin: 1.2rem 0;
     }
     .prose :global(h2) {
-      font-size: clamp(1.6rem, 4vw, 2rem);
-      margin: 3.2rem 0 0.4rem;
-      padding-top: 1.4rem;
+      font-size: clamp(1.6rem, 4vw, 2.05rem);
+      margin: 3.4rem 0 0.4rem;
+      padding-top: 1.5rem;
       border-top: 1px solid var(--line);
+      scroll-margin-top: 5.5rem;
     }
-    .prose :global(h2 .anchor),
-    .prose :global(h3 .anchor) { color: inherit; text-decoration: none; }
     .prose :global(h3) {
       font-size: 1.3rem;
-      margin: 2.2rem 0 0.4rem;
+      margin: 2.3rem 0 0.4rem;
+      scroll-margin-top: 5.5rem;
     }
+    /* Heading anchor link on hover */
+    .prose :global(h2), .prose :global(h3) { position: relative; }
+    .prose :global(h2 > a.anchor),
+    .prose :global(h3 > a.anchor) {
+      position: absolute;
+      left: -1.4rem;
+      color: var(--accent);
+      opacity: 0;
+      text-decoration: none;
+      transition: opacity 0.15s ease;
+    }
+    .prose :global(h2:hover > a.anchor),
+    .prose :global(h3:hover > a.anchor) { opacity: 0.6; }
+
     .prose :global(h2 + p),
     .prose :global(h3 + p) { margin-top: 0.5rem; }
     .prose :global(ul),
@@ -108,47 +257,65 @@ const fmtDate = updated.toLocaleDateString('en-US', {
     .prose :global(strong) { font-weight: 600; color: var(--ink); }
 
     .prose :global(blockquote) {
-      margin: 1.8rem 0;
-      padding: 0.2rem 0 0.2rem 1.4rem;
+      margin: 2rem 0;
+      padding: 0.4rem 0 0.4rem 1.5rem;
       border-left: 3px solid var(--accent);
       font-family: var(--serif);
-      font-size: 1.2rem;
+      font-size: 1.25rem;
+      line-height: 1.45;
       font-style: italic;
       color: var(--ink-soft);
     }
 
     /* Code blocks (shiki) */
     .prose :global(pre) {
-      margin: 1.6rem 0;
-      padding: 1.1rem 1.2rem;
+      margin: 1.7rem 0;
+      padding: 1.15rem 1.3rem;
       border-radius: 12px;
       border: 1px solid var(--line-strong);
-      background: #fbf9f3 !important;
+      background: var(--paper-sunk) !important;
       overflow-x: auto;
       font-size: 0.86rem;
-      line-height: 1.6;
+      line-height: 1.65;
     }
     .prose :global(pre code) { background: none; border: none; padding: 0; white-space: pre; }
+    /* Dual-theme Shiki: pick the light token colours by default, dark ones
+       when [data-theme='dark'] is set on the root. */
+    .prose :global(.astro-code),
+    .prose :global(.astro-code span) {
+      color: var(--shiki-light);
+      background-color: transparent;
+    }
+    :global(:root[data-theme='dark']) .prose :global(.astro-code),
+    :global(:root[data-theme='dark']) .prose :global(.astro-code span) {
+      color: var(--shiki-dark);
+      font-style: var(--shiki-dark-font-style);
+      font-weight: var(--shiki-dark-font-weight);
+      text-decoration: var(--shiki-dark-text-decoration);
+    }
 
     .prose :global(table) {
       width: 100%;
       border-collapse: collapse;
-      margin: 1.8rem 0;
+      margin: 1.9rem 0;
       font-size: 0.95rem;
     }
     .prose :global(th),
     .prose :global(td) {
       text-align: left;
-      padding: 0.6rem 0.8rem;
+      padding: 0.65rem 0.85rem;
       border-bottom: 1px solid var(--line);
+      vertical-align: top;
     }
+    .prose :global(thead tr) { border-bottom: 2px solid var(--line-strong); }
     .prose :global(th) {
       font-family: var(--mono);
-      font-size: 0.72rem;
+      font-size: 0.7rem;
       letter-spacing: 0.08em;
       text-transform: uppercase;
       color: var(--ink-faint);
     }
+    .prose :global(tbody tr:nth-child(even)) { background: color-mix(in srgb, var(--ink) 3%, transparent); }
     .prose :global(tr:last-child td) { border-bottom: none; }
 
     .prose :global(hr) {
@@ -157,11 +324,20 @@ const fmtDate = updated.toLocaleDateString('en-US', {
       margin: 3rem 0;
     }
 
-    /* Lead paragraph */
+    /* Lead paragraph with a drop cap */
     .prose :global(> p:first-of-type) {
-      font-size: 1.2rem;
+      font-size: 1.24rem;
       line-height: 1.6;
       color: var(--ink-soft);
+    }
+    .prose :global(> p:first-of-type::first-letter) {
+      float: left;
+      font-family: var(--serif);
+      font-weight: 600;
+      font-size: 3.4rem;
+      line-height: 0.82;
+      padding: 0.25rem 0.6rem 0 0;
+      color: var(--accent-ink);
     }
   </style>
 </BaseLayout>

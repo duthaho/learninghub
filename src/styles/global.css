@@ -2,6 +2,7 @@
  *  learninghub — editorial design system
  *  Warm paper background, ink text, one accent per topic.
  *  Display serif for headings, humanist sans for body & UI.
+ *  Light + dark themes, driven entirely by CSS variables.
  * ------------------------------------------------------------------ */
 
 @import '@fontsource-variable/fraunces/index.css';
@@ -10,17 +11,24 @@
 @import '@fontsource/jetbrains-mono/500.css';
 
 :root {
-  /* Palette */
-  --paper: #f7f3ea;
+  /* ---- Light theme (default) ---- */
+  --paper: #f6f2e8;
   --paper-raised: #fdfbf6;
-  --ink: #22201c;
-  --ink-soft: #524d44;
-  --ink-faint: #8b8478;
-  --line: #e2daca;
-  --line-strong: #d3c9b4;
+  --paper-sunk: #efe9dc;
+  --ink: #201e1a;
+  --ink-soft: #554f45;
+  --ink-faint: #8a8175;
+  --line: #e5dccb;
+  --line-strong: #d4c9b2;
+  --dot: rgba(80, 70, 50, 0.05);
+  --shadow: 30, 25, 15;
+
+  /* Per-topic accent (overridden per article). These derived tokens use
+     color-mix so they adapt automatically to theme + accent. */
   --accent: #5b3cc4;
-  --accent-wash: color-mix(in srgb, var(--accent) 10%, var(--paper));
-  --accent-ink: color-mix(in srgb, var(--accent) 72%, var(--ink));
+  --accent-wash: color-mix(in srgb, var(--accent) 12%, var(--paper-raised));
+  --accent-ink: color-mix(in srgb, var(--accent) 68%, var(--ink));
+  --accent-line: color-mix(in srgb, var(--accent) 30%, var(--line));
 
   /* Type */
   --serif: 'Fraunces Variable', 'Fraunces', Georgia, 'Times New Roman', serif;
@@ -28,8 +36,29 @@
   --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
 
   /* Rhythm */
-  --measure: 42rem;
+  --measure: 44rem;
   --gap: clamp(1rem, 4vw, 2rem);
+
+  color-scheme: light;
+}
+
+:root[data-theme='dark'] {
+  --paper: #17150f;
+  --paper-raised: #201d16;
+  --paper-sunk: #110f0a;
+  --ink: #ece6d9;
+  --ink-soft: #b6ac9a;
+  --ink-faint: #8b8171;
+  --line: #322d24;
+  --line-strong: #433d31;
+  --dot: rgba(255, 240, 200, 0.045);
+  --shadow: 0, 0, 0;
+
+  --accent-wash: color-mix(in srgb, var(--accent) 20%, var(--paper-raised));
+  --accent-ink: color-mix(in srgb, var(--accent) 58%, var(--ink));
+  --accent-line: color-mix(in srgb, var(--accent) 38%, var(--line));
+
+  color-scheme: dark;
 }
 
 *,
@@ -40,7 +69,7 @@
 
 html {
   scroll-behavior: smooth;
-  scroll-padding-top: 5rem;
+  scroll-padding-top: 5.5rem;
 }
 
 body {
@@ -48,28 +77,38 @@ body {
   background: var(--paper);
   color: var(--ink);
   font-family: var(--sans);
-  font-size: 1.0625rem;
+  font-size: 1.075rem;
   line-height: 1.7;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
-  background-image:
-    radial-gradient(circle at 1px 1px, rgba(80, 70, 50, 0.045) 1px, transparent 0);
+  background-image: radial-gradient(circle at 1px 1px, var(--dot) 1px, transparent 0);
   background-size: 22px 22px;
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+  color: var(--ink);
 }
 
 /* ---- Typography ---- */
 h1, h2, h3, h4 {
   font-family: var(--serif);
   font-weight: 560;
-  line-height: 1.12;
+  line-height: 1.14;
   letter-spacing: -0.015em;
   color: var(--ink);
+  text-wrap: balance;
 }
+
+p { text-wrap: pretty; }
 
 a {
   color: var(--accent-ink);
-  text-decoration-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  text-decoration-thickness: 1px;
+  text-decoration-color: color-mix(in srgb, var(--accent) 35%, transparent);
   text-underline-offset: 3px;
+  transition: text-decoration-color 0.15s ease, color 0.15s ease;
 }
 a:hover { text-decoration-color: var(--accent); }
 
@@ -81,7 +120,7 @@ code {
 /* Inline code */
 :not(pre) > code {
   background: var(--accent-wash);
-  border: 1px solid var(--line);
+  border: 1px solid var(--accent-line);
   padding: 0.1em 0.38em;
   border-radius: 5px;
   color: var(--accent-ink);
@@ -109,12 +148,12 @@ code {
   align-items: center;
   gap: 0.4em;
   font-family: var(--mono);
-  font-size: 0.72rem;
+  font-size: 0.7rem;
   letter-spacing: 0.05em;
   text-transform: uppercase;
   color: var(--accent-ink);
   background: var(--accent-wash);
-  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--line));
+  border: 1px solid var(--accent-line);
   padding: 0.28em 0.7em;
   border-radius: 999px;
 }
@@ -128,12 +167,17 @@ code {
   color: var(--paper-raised);
   background: var(--ink);
   border: 1px solid var(--ink);
-  padding: 0.7em 1.3em;
-  border-radius: 10px;
+  padding: 0.72em 1.35em;
+  border-radius: 11px;
   text-decoration: none;
-  transition: transform 0.15s ease, background 0.15s ease;
+  transition: transform 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
 }
-.btn:hover { transform: translateY(-2px); background: var(--accent-ink); border-color: var(--accent-ink); }
+.btn:hover {
+  transform: translateY(-2px);
+  background: var(--accent-ink);
+  border-color: var(--accent-ink);
+  box-shadow: 0 12px 24px -14px rgba(var(--shadow), 0.5);
+}
 
 /* Focus visibility */
 :focus-visible {
@@ -143,5 +187,9 @@ code {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  * { scroll-behavior: auto !important; transition: none !important; }
+  * {
+    scroll-behavior: auto !important;
+    transition: none !important;
+    animation: none !important;
+  }
 }
