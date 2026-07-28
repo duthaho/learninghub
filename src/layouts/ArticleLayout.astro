@@ -10,7 +10,7 @@ interface Props {
   headings?: MarkdownHeading[];
 }
 const { article, headings = [] } = Astro.props;
-const { title, subtitle, description, level, readingTime, updated } = article.data;
+const { title, subtitle, description, readingTime, updated } = article.data;
 const base = import.meta.env.BASE_URL;
 const toc = headings.filter((h) => h.depth === 2);
 const fmtDate = updated.toLocaleDateString('en-US', {
@@ -26,7 +26,6 @@ const fmtDate = updated.toLocaleDateString('en-US', {
   <article class="wrap">
     <header class="article-head">
       <a class="back" href={`${base}#topics`}>← All topics</a>
-      <span class="tag">{level}</span>
       <h1>{title}</h1>
       <p class="subtitle">{subtitle}</p>
     </header>
@@ -44,7 +43,6 @@ const fmtDate = updated.toLocaleDateString('en-US', {
         <Panel title="Article" meta="info" padded={false}>
           <table class="meta-table">
             <tbody>
-              <tr><th>level</th><td>{level}</td></tr>
               <tr><th>read</th><td>{readingTime}</td></tr>
               <tr><th>updated</th><td>{fmtDate}</td></tr>
               <tr><th>status</th><td>Living document</td></tr>
@@ -106,7 +104,6 @@ const fmtDate = updated.toLocaleDateString('en-US', {
     .article-head { padding: 2.5rem 0 0; max-width: 46rem; }
     .back { display: inline-block; font-size: 0.88rem; color: var(--ink-faint); margin-bottom: 1.4rem; }
     .back:hover { color: var(--accent-ink); }
-    .article-head .tag { margin-bottom: 1rem; }
     .article-head h1 { font-size: clamp(2rem, 5vw, 3rem); margin: 0.7rem 0 0; }
     .subtitle {
       font-size: clamp(1.05rem, 2.4vw, 1.3rem);
