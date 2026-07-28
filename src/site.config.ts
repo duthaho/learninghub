@@ -10,9 +10,10 @@ export const site = {
 export const support = {
   /** Turn the whole "Buy me a coffee" feature on/off. */
   enabled: true,
-  /** Your Buy Me a Coffee username → buymeacoffee.com/<handle>.
-   *  ⚠️ Claim this handle at buymeacoffee.com, or change it here. */
-  handle: 'duthaho',
+  /** Your Buy Me a Coffee page slug → buymeacoffee.com/<handle>.
+   *  This is the public link BMC assigned. You can set a custom URL in
+   *  BMC → Settings → Page, then update this one line. */
+  handle: 'lp1cMOE',
   /** Button label. */
   label: 'Buy me a coffee',
   /** Longer invitation used in the larger article/footer block. */
