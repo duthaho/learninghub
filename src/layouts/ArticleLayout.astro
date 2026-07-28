@@ -1,5 +1,6 @@
 ---
 import BaseLayout from './BaseLayout.astro';
+import Support from '../components/Support.astro';
 import type { CollectionEntry } from 'astro:content';
 
 interface Props {
@@ -33,6 +34,7 @@ const fmtDate = updated.toLocaleDateString('en-US', {
 
     <div class="prose wrap">
       <slot />
+      <Support variant="block" />
     </div>
   </article>
 

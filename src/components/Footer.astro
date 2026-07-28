@@ -1,13 +1,17 @@
 ---
+import Support from './Support.astro';
 const year = new Date().getFullYear();
 ---
 
 <footer class="site-footer">
   <div class="wrap inner">
-    <p class="lede">
-      <span class="mark" aria-hidden="true">◆</span> learninghub —
-      backend systems, understood, not memorised.
-    </p>
+    <div class="top">
+      <p class="lede">
+        <span class="mark" aria-hidden="true">◆</span> learninghub —
+        backend systems, understood, not memorised.
+      </p>
+      <Support variant="inline" />
+    </div>
     <p class="fine">
       Written in public from real study notes. © {year}. Built with Astro.
     </p>
@@ -21,10 +25,18 @@ const year = new Date().getFullYear();
     background: var(--paper-raised);
   }
   .inner { padding: 3rem 0; }
+  .top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem 1.5rem;
+    flex-wrap: wrap;
+    margin-bottom: 0.5rem;
+  }
   .lede {
     font-family: var(--serif);
     font-size: 1.15rem;
-    margin: 0 0 0.5rem;
+    margin: 0;
   }
   .mark { color: var(--accent); }
   .fine { color: var(--ink-faint); font-size: 0.9rem; margin: 0; }
