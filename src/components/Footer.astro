@@ -1,65 +1,43 @@
 ---
-import Support from './Support.astro';
+import { support, supportUrl } from '../site.config';
 interface Props { support?: boolean }
-const { support = true } = Astro.props;
+const { support: showSupport = true } = Astro.props;
 const base = import.meta.env.BASE_URL;
 const year = new Date().getFullYear();
 ---
 
 <footer class="site-footer">
   <div class="wrap inner">
-    <div class="cols">
-      <div class="about">
-        <p class="logo">learning<span>hub</span></p>
-        <p class="tag">Backend systems, understood — not memorised. Written in
-          public from real study notes.</p>
-      </div>
-      <nav class="links" aria-label="Footer">
-        <a href={`${base}#topics`}>Topics</a>
-        <a href={`${base}about/`}>About</a>
-        <a href="https://github.com/duthaho/learninghub" target="_blank" rel="noopener noreferrer">GitHub</a>
-      </nav>
-    </div>
-    {support && (
-      <div class="support-row">
-        <span>Found this useful?</span>
-        <Support variant="inline" />
-      </div>
-    )}
-    <p class="fine">© {year} learninghub · Built with Astro</p>
+    <span class="copy">© {year} <b>learning<span>hub</span></b></span>
+    <nav class="links" aria-label="Footer">
+      <a href={`${base}#topics`}>Topics</a>
+      <a href={`${base}about/`}>About</a>
+      <a href="https://github.com/duthaho/learninghub" target="_blank" rel="noopener noreferrer">GitHub</a>
+      {support.enabled && showSupport && (
+        <a href={supportUrl} target="_blank" rel="noopener noreferrer">☕ Coffee</a>
+      )}
+    </nav>
   </div>
 </footer>
 
 <style>
   .site-footer {
-    margin-top: 5rem;
+    margin-top: 4rem;
     border-top: 1px solid var(--line);
     background: var(--paper-raised);
   }
-  .inner { padding: 3rem 0 2.5rem; }
-  .cols {
-    display: flex;
-    justify-content: space-between;
-    gap: 2rem;
-    flex-wrap: wrap;
-    margin-bottom: 2rem;
-  }
-  .logo { font-weight: 750; font-size: 1.15rem; letter-spacing: -0.03em; margin: 0 0 0.5rem; }
-  .logo span { color: var(--accent); }
-  .about .tag { max-width: 26rem; color: var(--ink-soft); font-size: 0.9rem; margin: 0; }
-  .links { display: flex; gap: 1.4rem; align-items: flex-start; }
-  .links a { color: var(--ink-soft); font-weight: 500; font-size: 0.9rem; }
-  .links a:hover { color: var(--accent-ink); }
-
-  .support-row {
+  .inner {
     display: flex;
     align-items: center;
+    justify-content: space-between;
     gap: 1rem;
     flex-wrap: wrap;
-    padding: 1.2rem 0;
-    border-top: 1px solid var(--line);
-    color: var(--ink-soft);
-    font-size: 0.92rem;
+    padding: 1.4rem 0;
   }
-  .fine { color: var(--ink-faint); font-size: 0.82rem; margin: 1rem 0 0; font-family: var(--mono); }
+  .copy { font-family: var(--mono); font-size: 0.8rem; color: var(--ink-faint); }
+  .copy b { font-weight: 700; color: var(--ink-soft); }
+  .copy span { color: var(--accent); }
+  .links { display: flex; gap: 1.3rem; }
+  .links a { color: var(--ink-soft); font-size: 0.88rem; font-weight: 500; }
+  .links a:hover { color: var(--accent-ink); }
 </style>
