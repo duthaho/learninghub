@@ -7,9 +7,12 @@ interface Props {
   title: string;
   description: string;
   accent?: string;
+  // Show the coffee button in the footer. Off for pages that already carry a
+  // prominent support CTA (e.g. the article-end card) to avoid a double ask.
+  footerSupport?: boolean;
 }
 
-const { title, description, accent } = Astro.props;
+const { title, description, accent, footerSupport = true } = Astro.props;
 const base = import.meta.env.BASE_URL;
 const canonical = new URL(Astro.url.pathname, Astro.site);
 ---
@@ -35,7 +38,7 @@ const canonical = new URL(Astro.url.pathname, Astro.site);
     <main id="main">
       <slot />
     </main>
-    <Footer />
+    <Footer support={footerSupport} />
     <style>
       .skip {
         position: absolute;

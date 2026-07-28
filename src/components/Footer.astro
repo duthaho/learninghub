@@ -1,5 +1,10 @@
 ---
 import Support from './Support.astro';
+
+interface Props {
+  support?: boolean;
+}
+const { support = true } = Astro.props;
 const year = new Date().getFullYear();
 ---
 
@@ -10,7 +15,7 @@ const year = new Date().getFullYear();
         <span class="mark" aria-hidden="true">◆</span> learninghub —
         backend systems, understood, not memorised.
       </p>
-      <Support variant="inline" />
+      {support && <Support variant="inline" />}
     </div>
     <p class="fine">
       Written in public from real study notes. © {year}. Built with Astro.
