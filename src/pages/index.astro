@@ -6,76 +6,83 @@ const articles = (await getCollection('articles', ({ data }) => !data.draft))
   .sort((a, b) => a.data.order - b.data.order);
 const base = import.meta.env.BASE_URL;
 
-// Topics not written yet — shown as "coming soon" so the grid feels alive.
 const upcoming = [
-  { title: 'MySQL', subtitle: 'Indexes, transactions & the query planner', accent: '#00758f' },
-  { title: 'Elasticsearch', subtitle: 'Inverted indexes, relevance & aggregations', accent: '#0b7285' },
+  { id: 'mysql', title: 'MySQL', subtitle: 'Indexes, transactions & the query planner' },
+  { id: 'elasticsearch', title: 'Elasticsearch', subtitle: 'Inverted indexes, relevance & aggregations' },
 ];
+
+const fileIcon = 'M13 2v6h6';
 ---
 
 <BaseLayout
   title="learninghub — backend systems, understood not memorised"
-  description="In-depth, illustrated deep-dives on the backend systems every engineer leans on — Redis, MySQL, Elasticsearch and more. Written in public from real study notes."
+  description="In-depth deep-dives on the backend systems every engineer leans on — Redis, MySQL, Elasticsearch and more. Written in public from real study notes."
 >
-  <section class="hero">
-    <div class="wrap">
-      <p class="eyebrow">Deep-dives on the systems you actually use</p>
-      <h1>
-        Backend systems,<br />
-        <em>understood</em> — not memorised.
-      </h1>
-      <p class="lede">
-        I learn one system at a time, to the point where I can make design
-        decisions and read other people's code. These are those notes, rewritten
-        as illustrated deep-dives — mental models first, gotchas included, no
-        hand-waving.
-      </p>
-      <div class="cta">
-        <a class="btn" href="#topics">Browse topics ↓</a>
-        <a class="ghost" href={`${base}about/`}>How this works →</a>
-      </div>
-
-      <ul class="principles" role="list">
-        <li><span aria-hidden="true">◆</span> Mental model first</li>
-        <li><span aria-hidden="true">◆</span> Taught to a rubric</li>
-        <li><span aria-hidden="true">◆</span> Real gotchas, not trivia</li>
-      </ul>
+  <section class="hero wrap">
+    <p class="eyebrow">Deep-dives on the systems you actually use</p>
+    <h1>Backend systems, <span class="accent">understood</span> — not memorised.</h1>
+    <p class="lede">
+      I learn one system at a time, to the point where I can make design
+      decisions and read other people's code. These are those notes, rewritten
+      as structured deep-dives — mental models first, gotchas included.
+    </p>
+    <div class="cta">
+      <a class="btn" href="#topics">Browse topics</a>
+      <a class="btn-ghost" href={`${base}about/`}>How this works</a>
     </div>
+    <ul class="chips" role="list">
+      <li>Mental model first</li>
+      <li>Taught to a rubric</li>
+      <li>Real gotchas, not trivia</li>
+    </ul>
   </section>
 
-  <section id="topics" class="topics">
-    <div class="wrap">
-      <div class="section-head">
-        <h2>Topics</h2>
-        <p>{articles.length} live · {upcoming.length} in progress</p>
+  <section id="topics" class="topics wrap">
+    <div class="panel">
+      <div class="panel-head">
+        <span class="p-title">
+          <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+          Topics
+        </span>
+        <span class="p-meta">{articles.length} live · {upcoming.length} in progress</span>
       </div>
 
-      <ul class="grid" role="list">
-        {articles.map((a, i) => (
-          <li class="card" style={`--accent:${a.data.accent}`}>
+      <ul class="list" role="list">
+        {articles.map((a) => (
+          <li class="row">
             <a href={`${base}${a.id}/`}>
-              <span class="idx">{String(i + 1).padStart(2, '0')}</span>
-              <div class="card-top">
-                <span class="tag">{a.data.level}</span>
+              <span class="ficon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="18" height="18"><path d="M6 2h8l4 4v16H6z"/><path d={fileIcon}/></svg>
+              </span>
+              <span class="row-main">
+                <span class="row-top">
+                  <span class="fname">{a.id}.md</span>
+                  <span class="tag">{a.data.level}</span>
+                </span>
+                <span class="row-title">{a.data.title}</span>
+                <span class="row-sub">{a.data.subtitle}</span>
+              </span>
+              <span class="row-end">
                 <span class="rt">{a.data.readingTime}</span>
-              </div>
-              <h3>{a.data.title}</h3>
-              <p class="sub">{a.data.subtitle}</p>
-              <p class="desc">{a.data.description}</p>
-              <span class="more">Read the deep-dive →</span>
+                <span class="go" aria-hidden="true">→</span>
+              </span>
             </a>
           </li>
         ))}
-
-        {upcoming.map((u, i) => (
-          <li class="card card-soon" style={`--accent:${u.accent}`}>
-            <span class="idx">{String(articles.length + i + 1).padStart(2, '0')}</span>
-            <div class="card-top">
-              <span class="tag tag-soon">Coming soon</span>
-            </div>
-            <h3>{u.title}</h3>
-            <p class="sub">{u.subtitle}</p>
-            <span class="more soon">In the writing queue</span>
+        {upcoming.map((u) => (
+          <li class="row row-soon">
+            <span class="ficon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="18" height="18"><path d="M6 2h8l4 4v16H6z"/><path d={fileIcon}/></svg>
+            </span>
+            <span class="row-main">
+              <span class="row-top">
+                <span class="fname">{u.id}.md</span>
+                <span class="tag tag-soon">Coming soon</span>
+              </span>
+              <span class="row-title">{u.title}</span>
+              <span class="row-sub">{u.subtitle}</span>
+            </span>
+            <span class="row-end"><span class="rt">queued</span></span>
           </li>
         ))}
       </ul>
@@ -83,131 +90,67 @@ const upcoming = [
   </section>
 
   <style>
-    .hero { padding: clamp(3rem, 9vw, 6.5rem) 0 clamp(2.5rem, 6vw, 4rem); }
+    .hero { padding: clamp(3rem, 8vw, 5.5rem) 0 clamp(2rem, 5vw, 3.5rem); }
     .hero h1 {
-      font-size: clamp(2.6rem, 8vw, 5rem);
-      margin: 1.2rem 0 0;
-      max-width: 16ch;
+      font-size: clamp(2.3rem, 6.5vw, 4rem);
+      margin: 1rem 0 0;
+      max-width: 18ch;
     }
-    .hero h1 em {
-      font-family: var(--serif);
-      font-style: italic;
-      font-weight: 500;
-      color: var(--accent);
-    }
+    .hero h1 .accent { color: var(--accent); }
     .lede {
       max-width: 40rem;
-      font-size: clamp(1.1rem, 2.5vw, 1.3rem);
+      font-size: clamp(1.05rem, 2.2vw, 1.22rem);
       line-height: 1.6;
       color: var(--ink-soft);
-      margin: 1.6rem 0 2.2rem;
+      margin: 1.4rem 0 2rem;
     }
-    .cta { display: flex; gap: 1.4rem; align-items: center; flex-wrap: wrap; }
-    .ghost { color: var(--ink-soft); font-weight: 500; text-decoration: none; }
-    .ghost:hover { color: var(--accent-ink); }
-
-    .principles {
-      list-style: none;
-      margin: 2.6rem 0 0;
-      padding: 1.4rem 0 0;
-      border-top: 1px solid var(--line);
-      display: flex;
-      flex-wrap: wrap;
-      gap: 0.8rem 2rem;
-      font-size: 0.92rem;
+    .cta { display: flex; gap: 0.8rem; flex-wrap: wrap; }
+    .chips { list-style: none; display: flex; flex-wrap: wrap; gap: 0.6rem; margin: 2.2rem 0 0; padding: 0; }
+    .chips li {
+      font-size: 0.82rem;
       color: var(--ink-soft);
-    }
-    .principles li { display: flex; align-items: center; gap: 0.5rem; }
-    .principles span { color: var(--accent); font-size: 0.7rem; }
-
-    .section-head {
-      display: flex;
-      align-items: baseline;
-      justify-content: space-between;
-      gap: 1rem;
-      margin-bottom: 1.8rem;
-      padding-bottom: 1rem;
-      border-bottom: 1px solid var(--line);
-    }
-    .section-head h2 { font-size: clamp(1.6rem, 4vw, 2.2rem); margin: 0; }
-    .section-head p { color: var(--ink-faint); margin: 0; font-size: 0.9rem; font-family: var(--mono); }
-
-    .grid {
-      list-style: none;
-      margin: 0;
-      padding: 0;
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(min(100%, 20rem), 1fr));
-      gap: 1.4rem;
-    }
-    .card {
-      position: relative;
       background: var(--paper-raised);
       border: 1px solid var(--line);
-      border-radius: 16px;
-      overflow: hidden;
-      transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+      border-radius: 999px;
+      padding: 0.35rem 0.85rem;
     }
-    /* accent bar along the top edge */
-    .card::before {
-      content: '';
-      position: absolute;
-      inset: 0 0 auto 0;
-      height: 3px;
-      background: var(--accent);
-      opacity: 0.85;
-    }
-    .card:hover {
-      transform: translateY(-4px);
-      border-color: var(--accent-line);
-      box-shadow: 0 20px 44px -26px color-mix(in srgb, var(--accent) 60%, transparent);
-    }
-    .card > a,
-    .card.card-soon { display: block; padding: 1.6rem; text-decoration: none; color: inherit; }
+    .chips li::before { content: '✦'; color: var(--accent); margin-right: 0.4rem; }
 
-    .idx {
-      position: absolute;
-      top: 1.3rem;
-      right: 1.3rem;
-      font-family: var(--mono);
-      font-size: 0.8rem;
-      letter-spacing: 0.05em;
-      color: var(--ink-faint);
-      opacity: 0.7;
-    }
-    .card-top {
+    .topics { margin-bottom: 1rem; }
+
+    /* File-explorer style list */
+    .list { list-style: none; margin: 0; padding: 0; }
+    .row { border-bottom: 1px solid var(--line); }
+    .row:last-child { border-bottom: none; }
+    .row > a,
+    .row.row-soon {
       display: flex;
       align-items: center;
-      justify-content: space-between;
-      gap: 0.5rem;
-      margin-bottom: 1.1rem;
-      padding-right: 2rem;
+      gap: 1rem;
+      padding: 1rem 1.25rem;
+      text-decoration: none;
+      color: inherit;
     }
-    .rt { font-family: var(--mono); font-size: 0.7rem; color: var(--ink-faint); }
-    .card h3 {
-      font-size: 1.55rem;
-      margin: 0 0 0.3rem;
-    }
-    .card .sub {
-      font-family: var(--serif);
-      font-style: italic;
-      color: var(--accent-ink);
-      margin: 0 0 0.8rem;
-      font-size: 1rem;
-      line-height: 1.35;
-    }
-    .card .desc { color: var(--ink-soft); font-size: 0.95rem; margin: 0 0 1.2rem; }
-    .more { font-weight: 500; font-size: 0.9rem; color: var(--accent-ink); }
+    .row > a { transition: background 0.15s ease; }
+    .row > a:hover { background: var(--paper-sunk); }
+    .ficon { color: var(--accent); flex: 0 0 auto; display: grid; place-items: center; }
+    .ficon svg { fill: none; stroke: currentColor; stroke-width: 1.7; }
+    .row-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 0.15rem; }
+    .row-top { display: flex; align-items: center; gap: 0.7rem; flex-wrap: wrap; }
+    .fname { font-family: var(--mono); font-size: 0.8rem; color: var(--ink-faint); }
+    .row-title { font-weight: 650; font-size: 1.12rem; letter-spacing: -0.01em; color: var(--ink); }
+    .row-sub { color: var(--ink-soft); font-size: 0.92rem; }
+    .row-end { flex: 0 0 auto; display: flex; align-items: center; gap: 1rem; }
+    .rt { font-family: var(--mono); font-size: 0.72rem; color: var(--ink-faint); white-space: nowrap; }
+    .go { color: var(--accent); font-size: 1.1rem; transition: transform 0.15s ease; }
+    .row > a:hover .go { transform: translateX(3px); }
 
-    /* Coming-soon variant */
-    .card-soon { opacity: 0.82; }
-    .card-soon::before { opacity: 0.4; }
-    .card-soon:hover { transform: none; box-shadow: none; border-color: var(--line); }
-    .tag-soon {
-      color: var(--ink-faint);
-      background: var(--paper-sunk);
-      border-color: var(--line);
+    .tag-soon { color: var(--ink-faint); background: var(--paper-sunk); border-color: var(--line); }
+    .row-soon { opacity: 0.72; }
+
+    @media (max-width: 34rem) {
+      .row-end .rt { display: none; }
+      .row > a, .row.row-soon { padding: 0.9rem 1rem; }
     }
-    .more.soon { color: var(--ink-faint); font-family: var(--mono); font-size: 0.75rem; letter-spacing: 0.04em; }
   </style>
 </BaseLayout>

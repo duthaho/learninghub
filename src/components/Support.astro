@@ -1,94 +1,47 @@
 ---
+import Panel from './Panel.astro';
 import { support, supportUrl } from '../site.config';
 
 interface Props {
-  // 'block' — full invitation card (article end, footer prominent spot)
-  // 'inline' — a single compact button
-  variant?: 'block' | 'inline';
+  // 'card'   — titled panel with blurb + button (article sidebar)
+  // 'inline' — a single compact button (footer)
+  variant?: 'card' | 'inline';
 }
-const { variant = 'block' } = Astro.props;
+const { variant = 'card' } = Astro.props;
 ---
 
 {support.enabled && (
   variant === 'inline' ? (
     <a class="bmc-inline" href={supportUrl} target="_blank" rel="noopener noreferrer">
-      <span class="cup" aria-hidden="true">☕</span>
-      {support.label}
+      <span aria-hidden="true">☕</span> {support.label}
     </a>
   ) : (
-    <aside class="bmc-block">
-      <span class="cup" aria-hidden="true">☕</span>
-      <div class="bmc-copy">
-        <p class="bmc-title">Enjoyed this?</p>
-        <p class="bmc-blurb">{support.blurb}</p>
-      </div>
-      <a class="bmc-btn" href={supportUrl} target="_blank" rel="noopener noreferrer">
-        {support.label}
+    <Panel title="Support the work" meta="☕">
+      <p class="blurb">{support.blurb}</p>
+      <a class="btn support-btn" href={supportUrl} target="_blank" rel="noopener noreferrer">
+        <span aria-hidden="true">☕</span> {support.label}
       </a>
-    </aside>
+    </Panel>
   )
 )}
 
 <style>
-  /* Full invitation card */
-  .bmc-block {
-    display: flex;
-    align-items: center;
-    gap: 1.1rem;
-    flex-wrap: wrap;
-    margin: 3.5rem 0 0;
-    padding: 1.6rem 1.7rem;
-    border: 1px solid var(--line-strong);
-    border-radius: 16px;
-    background: var(--paper-sunk);
-  }
-  .bmc-block .cup { font-size: 1.9rem; line-height: 1; }
-  .bmc-copy { flex: 1 1 14rem; }
-  .bmc-title {
-    font-family: var(--serif);
-    font-size: 1.25rem;
-    font-weight: 560;
-    margin: 0 0 0.15rem;
-  }
-  .bmc-blurb { margin: 0; color: var(--ink-soft); font-size: 0.98rem; }
+  .blurb { margin: 0 0 1rem; font-size: 0.9rem; color: var(--ink-soft); line-height: 1.55; }
+  .support-btn { width: 100%; }
 
-  .bmc-btn {
-    flex: 0 0 auto;
-    display: inline-flex;
-    align-items: center;
-    gap: 0.5em;
-    font-weight: 550;
-    font-size: 0.95rem;
-    text-decoration: none;
-    color: #1a1608;
-    background: #ffdd00;
-    border: 1px solid color-mix(in srgb, #ffdd00 70%, #b58b00);
-    padding: 0.7em 1.25em;
-    border-radius: 10px;
-    box-shadow: 0 2px 0 color-mix(in srgb, #b58b00 60%, transparent);
-    transition: transform 0.15s ease, box-shadow 0.15s ease;
-  }
-  .bmc-btn:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 5px 0 color-mix(in srgb, #b58b00 55%, transparent);
-  }
-  .bmc-btn::before { content: '☕'; }
-
-  /* Compact inline button (footer) */
   .bmc-inline {
     display: inline-flex;
     align-items: center;
     gap: 0.45em;
-    font-size: 0.9rem;
-    font-weight: 500;
+    font-size: 0.88rem;
+    font-weight: 550;
     text-decoration: none;
-    color: var(--ink);
+    color: #1a1608;
     background: #ffdd00;
     border: 1px solid color-mix(in srgb, #ffdd00 70%, #b58b00);
-    padding: 0.5em 0.9em;
+    padding: 0.5em 0.95em;
     border-radius: 9px;
     transition: transform 0.15s ease;
   }
-  .bmc-inline:hover { transform: translateY(-2px); }
-  .bmc-inline .cup { font-size: 1rem; }
+  .bmc-inline:hover { transform: translateY(-1px); color: #1a1608; }
 </style>

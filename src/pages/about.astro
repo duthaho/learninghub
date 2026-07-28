@@ -1,5 +1,6 @@
 ---
 import BaseLayout from '../layouts/BaseLayout.astro';
+import Panel from '../components/Panel.astro';
 ---
 
 <BaseLayout
@@ -7,46 +8,52 @@ import BaseLayout from '../layouts/BaseLayout.astro';
   description="Why learninghub exists and how these deep-dives are written."
 >
   <section class="about wrap">
-    <p class="eyebrow">About</p>
+    <span class="tag">About</span>
     <h1>Learning in public, one system at a time.</h1>
 
-    <div class="body">
-      <p>
-        Every article here starts as a personal study log: a syllabus, a set of
-        pass/fail checks, and a running list of the things I got <em>wrong</em>
-        and had to relearn. When a topic clicks, I rewrite those notes as a
-        deep-dive meant for someone standing where I was a few weeks ago.
-      </p>
+    <p class="intro">
+      Every article here starts as a personal study log: a syllabus, a set of
+      pass/fail checks, and a running list of the things I got <em>wrong</em> and
+      had to relearn. When a topic clicks, I rewrite those notes as a deep-dive
+      meant for someone standing where I was a few weeks ago.
+    </p>
 
-      <h2>How each deep-dive is built</h2>
-      <ul>
-        <li><strong>Mental model first.</strong> Before any API, the one idea that makes the rest make sense.</li>
-        <li><strong>Taught to a rubric.</strong> Each section maps to a concrete "can you actually do this?" check, not just exposure.</li>
-        <li>
-          <strong>Gotchas are first-class.</strong> The
-          <span class="tag" style="--accent:#c2410c">⚠ Gotcha</span>
-          boxes are real mistakes from my review queue — the misconceptions that
-          cost me a session to unlearn, so they cost you a minute.
-        </li>
-        <li><strong>Verified, not remembered.</strong> Version-specific facts are checked against current docs before publishing.</li>
-      </ul>
+    <Panel title="How each deep-dive is built" meta="method" padded={false}>
+      <table class="meta-table">
+        <tbody>
+          <tr>
+            <th>model</th>
+            <td>Mental model first — before any API, the one idea that makes the rest make sense.</td>
+          </tr>
+          <tr>
+            <th>rubric</th>
+            <td>Each section maps to a concrete "can you actually do this?" check, not just exposure.</td>
+          </tr>
+          <tr>
+            <th>gotchas</th>
+            <td>The <span class="tag inline-tag">⚠ Gotcha</span> boxes are real mistakes from my review queue — misconceptions that cost me a session to unlearn, so they cost you a minute.</td>
+          </tr>
+          <tr>
+            <th>verified</th>
+            <td>Version-specific facts are checked against current docs before publishing.</td>
+          </tr>
+        </tbody>
+      </table>
+    </Panel>
 
-      <p>
-        The goal isn't a reference you skim — it's understanding you keep. If a
-        section can't survive being explained back in your own words, it isn't
-        done.
-      </p>
-    </div>
+    <p class="outro">
+      The goal isn't a reference you skim — it's understanding you keep. If a
+      section can't survive being explained back in your own words, it isn't done.
+    </p>
   </section>
 
   <style>
-    .about { max-width: 44rem; padding-top: 3rem; }
-    .about h1 { font-size: clamp(2rem, 6vw, 3rem); margin: 0.6rem 0 2rem; }
-    .body { font-size: 1.1rem; line-height: 1.7; }
-    .body h2 { font-size: 1.5rem; margin: 2.5rem 0 0.6rem; }
-    .body ul { padding-left: 1.2rem; }
-    .body li { margin: 0.7rem 0; }
-    .body li::marker { color: var(--accent); }
-    .body em { color: var(--accent-ink); font-style: italic; }
+    .about { max-width: 44rem; padding-top: 2.8rem; }
+    .about h1 { font-size: clamp(1.9rem, 5vw, 2.8rem); margin: 1rem 0 1.4rem; }
+    .intro, .outro { font-size: 1.08rem; line-height: 1.65; color: var(--ink-soft); }
+    .intro { margin: 0 0 2rem; }
+    .outro { margin: 2rem 0 0; }
+    .about em { color: var(--accent-ink); font-style: italic; }
+    .inline-tag { text-transform: none; }
   </style>
 </BaseLayout>

@@ -30,7 +30,6 @@ const canonical = new URL(Astro.url.pathname, Astro.site);
     <meta property="og:description" content={description} />
     <meta property="og:type" content="website" />
     <meta name="generator" content={Astro.generator} />
-    {accent && <style set:html={`:root{--accent:${accent};}`} />}
     {/* Set theme before first paint to avoid a flash of the wrong theme. */}
     <script is:inline>
       (function () {

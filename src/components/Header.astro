@@ -1,61 +1,43 @@
 ---
 const base = import.meta.env.BASE_URL;
 const path = Astro.url.pathname;
-const links = [
-  { href: `${base}#topics`, label: 'Topics', match: '__never__' },
-  { href: `${base}about/`, label: 'About', match: `${base}about` },
-];
-const isActive = (m: string) => m !== '__never__' && path.startsWith(m);
+const repo = 'https://github.com/duthaho/learninghub';
+const onAbout = path.startsWith(`${base}about`);
 ---
 
 <header class="site-header">
   <div class="wrap bar">
     <a class="brand" href={base} aria-label="learninghub home">
-      <span class="mark" aria-hidden="true">◆</span>
-      <span class="name">learninghub</span>
+      <span class="logo">learning<span class="logo-accent">hub</span></span>
     </a>
+
     <nav aria-label="Primary">
-      {links.map((l) => (
-        <a href={l.href} class:list={['nav-link', { active: isActive(l.match) }]}>
-          {l.label}
-        </a>
-      ))}
-      <button
-        id="theme-toggle"
-        class="theme-toggle"
-        type="button"
-        aria-label="Toggle colour theme"
-        title="Toggle light / dark"
-      >
-        <svg class="i-sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
-          <circle cx="12" cy="12" r="4.2" fill="currentColor" />
-          <g stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
-            <line x1="12" y1="2.5" x2="12" y2="5" /><line x1="12" y1="19" x2="12" y2="21.5" />
-            <line x1="2.5" y1="12" x2="5" y2="12" /><line x1="19" y1="12" x2="21.5" y2="12" />
-            <line x1="5.1" y1="5.1" x2="6.8" y2="6.8" /><line x1="17.2" y1="17.2" x2="18.9" y2="18.9" />
-            <line x1="18.9" y1="5.1" x2="17.2" y2="6.8" /><line x1="6.8" y1="17.2" x2="5.1" y2="18.9" />
-          </g>
-        </svg>
-        <svg class="i-moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
-          <path
-            d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"
-            fill="currentColor"
-          />
-        </svg>
+      <a class="pill" href={`${base}#topics`}>
+        <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+        <span class="pill-label">Topics</span>
+      </a>
+      <a class="pill" class:list={[{ active: onAbout }]} href={`${base}about/`}>
+        <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><circle cx="12" cy="12" r="9"/><line x1="12" y1="11" x2="12" y2="16.5"/><circle cx="12" cy="7.6" r="0.4" fill="currentColor"/></svg>
+        <span class="pill-label">About</span>
+      </a>
+      <a class="pill" href={repo} target="_blank" rel="noopener noreferrer">
+        <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" fill="currentColor" stroke="none"><path d="M12 2a10 10 0 0 0-3.16 19.49c.5.09.68-.22.68-.48v-1.7c-2.78.6-3.37-1.34-3.37-1.34-.45-1.16-1.11-1.47-1.11-1.47-.9-.62.07-.6.07-.6 1 .07 1.53 1.03 1.53 1.03.9 1.53 2.36 1.09 2.94.83.09-.65.35-1.1.63-1.35-2.22-.25-4.55-1.11-4.55-4.94 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.65 0 0 .84-.27 2.75 1.02a9.5 9.5 0 0 1 5 0c1.91-1.29 2.75-1.02 2.75-1.02.55 1.38.2 2.4.1 2.65.64.7 1.03 1.59 1.03 2.68 0 3.84-2.34 4.68-4.57 4.93.36.31.68.92.68 1.85v2.74c0 .27.18.58.69.48A10 10 0 0 0 12 2z"/></svg>
+        <span class="pill-label">GitHub</span>
+      </a>
+      <button id="theme-toggle" class="pill icon-only" type="button" aria-label="Toggle colour theme" title="Toggle light / dark">
+        <svg class="i-sun" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="12" cy="12" r="4.2" fill="currentColor" stroke="none"/><g stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><line x1="12" y1="2.5" x2="12" y2="5"/><line x1="12" y1="19" x2="12" y2="21.5"/><line x1="2.5" y1="12" x2="5" y2="12"/><line x1="19" y1="12" x2="21.5" y2="12"/><line x1="5.1" y1="5.1" x2="6.8" y2="6.8"/><line x1="17.2" y1="17.2" x2="18.9" y2="18.9"/><line x1="18.9" y1="5.1" x2="17.2" y2="6.8"/><line x1="6.8" y1="17.2" x2="5.1" y2="18.9"/></g></svg>
+        <svg class="i-moon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z" fill="currentColor" stroke="none"/></svg>
       </button>
     </nav>
   </div>
 </header>
 
 <script>
-  const btn = document.getElementById('theme-toggle');
-  btn?.addEventListener('click', () => {
+  document.getElementById('theme-toggle')?.addEventListener('click', () => {
     const root = document.documentElement;
     const next = root.dataset.theme === 'dark' ? 'light' : 'dark';
     root.dataset.theme = next;
-    try {
-      localStorage.setItem('theme', next);
-    } catch (e) {}
+    try { localStorage.setItem('theme', next); } catch (e) {}
   });
 </script>
 
@@ -64,61 +46,47 @@ const isActive = (m: string) => m !== '__never__' && path.startsWith(m);
     position: sticky;
     top: 0;
     z-index: 40;
-    background: color-mix(in srgb, var(--paper) 80%, transparent);
+    background: color-mix(in srgb, var(--paper) 85%, transparent);
     backdrop-filter: saturate(150%) blur(12px);
     border-bottom: 1px solid var(--line);
   }
-  .bar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    height: 4rem;
-  }
-  .brand {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.55rem;
-    text-decoration: none;
+  .bar { display: flex; align-items: center; justify-content: space-between; height: 4rem; gap: 1rem; }
+  .brand { text-decoration: none; }
+  .logo {
+    font-weight: 750;
+    font-size: 1.2rem;
+    letter-spacing: -0.03em;
     color: var(--ink);
   }
-  .mark { color: var(--accent); font-size: 0.9rem; }
-  .name {
-    font-family: var(--display);
-    font-weight: 600;
-    font-size: 1.18rem;
-    letter-spacing: -0.02em;
-  }
-  nav { display: flex; align-items: center; gap: 0.4rem; }
-  .nav-link {
-    position: relative;
-    color: var(--ink-soft);
-    text-decoration: none;
-    font-size: 0.95rem;
-    font-weight: 450;
-    padding: 0.4rem 0.7rem;
-    border-radius: 8px;
-  }
-  .nav-link:hover { color: var(--accent-ink); background: var(--accent-wash); }
-  .nav-link.active { color: var(--accent-ink); }
+  .logo-accent { color: var(--accent); }
 
-  .theme-toggle {
-    display: inline-grid;
-    place-items: center;
-    width: 2.2rem;
-    height: 2.2rem;
-    margin-left: 0.3rem;
+  nav { display: flex; align-items: center; gap: 0.4rem; }
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.4rem 0.75rem;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--paper-raised);
     color: var(--ink-soft);
-    background: transparent;
-    border: 1px solid var(--line-strong);
-    border-radius: 9px;
+    font-size: 0.86rem;
+    font-weight: 500;
     cursor: pointer;
-    transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+    transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
   }
-  .theme-toggle:hover { color: var(--accent-ink); border-color: var(--accent-line); }
-  .theme-toggle svg { grid-area: 1 / 1; }
-  /* Show sun in dark mode (to switch to light), moon in light mode. */
+  .pill svg { stroke: currentColor; stroke-width: 1.8; fill: none; }
+  .pill:hover { border-color: var(--accent-line); color: var(--accent-ink); }
+  .pill.active { color: var(--accent-ink); border-color: var(--accent-line); background: var(--accent-wash); }
+  .pill.icon-only { padding: 0.4rem; width: 2.1rem; justify-content: center; }
+  .theme-toggle svg, .icon-only svg { display: block; }
   .i-sun { display: none; }
-  .i-moon { display: block; }
   :root[data-theme='dark'] .i-sun { display: block; }
   :root[data-theme='dark'] .i-moon { display: none; }
+
+  /* Collapse labels to icons on small screens */
+  @media (max-width: 40rem) {
+    .pill-label { display: none; }
+    .pill { padding: 0.4rem; width: 2.1rem; justify-content: center; }
+  }
 </style>

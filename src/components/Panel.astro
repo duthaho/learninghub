@@ -1,0 +1,27 @@
+---
+// A bordered panel with a gray header strip: title on the left, meta on the
+// right — the core skillsmp surface. Body goes in the default slot.
+interface Props {
+  title?: string;
+  meta?: string;
+  mono?: boolean; // render the title in monospace (file-name style)
+  bodyClass?: string;
+  padded?: boolean; // set false when the body manages its own padding
+  class?: string;
+}
+const { title, meta, mono = false, bodyClass = '', padded = true, class: cls = '' } =
+  Astro.props;
+---
+
+<section class={`panel ${cls}`}>
+  {(title || meta) && (
+    <div class="panel-head">
+      {title && <span class:list={['p-title', { mono }]}><slot name="title-icon" />{title}</span>}
+      {meta && <span class="p-meta">{meta}</span>}
+      <slot name="head-extra" />
+    </div>
+  )}
+  <div class:list={[padded ? 'panel-body' : '', bodyClass]}>
+    <slot />
+  </div>
+</section>
