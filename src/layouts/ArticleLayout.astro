@@ -2,6 +2,7 @@
 import BaseLayout from './BaseLayout.astro';
 import Panel from '../components/Panel.astro';
 import Support from '../components/Support.astro';
+import SeriesNav from '../components/SeriesNav.astro';
 import type { CollectionEntry } from 'astro:content';
 import type { MarkdownHeading } from 'astro';
 
@@ -29,6 +30,8 @@ const fmtDate = updated.toLocaleDateString('en-US', {
       <h1>{title}</h1>
       <p class="subtitle">{subtitle}</p>
     </header>
+
+    {article.data.series && <SeriesNav article={article} />}
 
     <div class="layout">
       <div class="main">

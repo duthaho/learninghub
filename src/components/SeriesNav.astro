@@ -1,0 +1,201 @@
+---
+// Compact in-series navigation strip shown at the top of each part of a
+// multi-part series. Self-contained: it re-derives its siblings from the
+// collection by shared `series` name, so nothing needs to be passed down the
+// layout. `part: 0` is the series cover (start-here guide); the rest are
+// numbered chapters.
+import { getCollection } from 'astro:content';
+import type { CollectionEntry } from 'astro:content';
+
+interface Props {
+  article: CollectionEntry<'articles'>;
+}
+const { article } = Astro.props;
+const base = import.meta.env.BASE_URL;
+const seriesName = article.data.series;
+
+const siblings = (
+  await getCollection('articles', ({ data }) => !data.draft && data.series === seriesName)
+).sort((a, b) => (a.data.part ?? 0) - (b.data.part ?? 0));
+
+const totalChapters = siblings.filter((a) => (a.data.part ?? 0) !== 0).length;
+const idx = siblings.findIndex((a) => a.id === article.id);
+const prev = idx > 0 ? siblings[idx - 1] : null;
+const next = idx < siblings.length - 1 ? siblings[idx + 1] : null;
+
+const isCover = (article.data.part ?? 0) === 0;
+const position = isCover ? 'Series guide' : `Part ${article.data.part} of ${totalChapters}`;
+const shortLabel = (a: CollectionEntry<'articles'>) =>
+  (a.data.part ?? 0) === 0 ? 'Guide' : `Part ${a.data.part}`;
+---
+
+{seriesName && siblings.length > 1 && (
+  <nav class="series-strip" aria-label={`${seriesName} series`}>
+    <details class="series-menu">
+      <summary>
+        <span class="badge">
+          <span class="dot" aria-hidden="true"></span>
+          {seriesName}
+        </span>
+        <span class="pos">{position}</span>
+        <span class="caret" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="14" height="14"><path d="M6 9l6 6 6-6"/></svg>
+        </span>
+      </summary>
+      <ol class="menu-list">
+        {siblings.map((a) => (
+          <li class={a.id === article.id ? 'here' : ''}>
+            <a href={`${base}${a.id}/`} aria-current={a.id === article.id ? 'page' : undefined}>
+              <span class="pl">{shortLabel(a)}</span>
+              <span class="pt">{a.data.title}</span>
+            </a>
+          </li>
+        ))}
+      </ol>
+    </details>
+
+    <div class="turns">
+      {prev ? (
+        <a class="turn" href={`${base}${prev.id}/`} rel="prev">
+          <span class="dir">← Prev</span>
+          <span class="tt">{prev.data.title}</span>
+        </a>
+      ) : (
+        <span class="turn empty" aria-hidden="true"></span>
+      )}
+      {next ? (
+        <a class="turn next" href={`${base}${next.id}/`} rel="next">
+          <span class="dir">Next →</span>
+          <span class="tt">{next.data.title}</span>
+        </a>
+      ) : (
+        <span class="turn empty" aria-hidden="true"></span>
+      )}
+    </div>
+  </nav>
+)}
+
+<style>
+  .series-strip {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: stretch;
+    gap: 0.6rem;
+    margin: 1.6rem 0 0;
+  }
+
+  /* ---- jump-to-part dropdown ---- */
+  .series-menu { position: relative; flex: 0 0 auto; }
+  .series-menu > summary {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.5rem 0.8rem;
+    list-style: none;
+    cursor: pointer;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--paper-raised);
+    transition: border-color 0.15s ease, background 0.15s ease;
+  }
+  .series-menu > summary::-webkit-details-marker { display: none; }
+  .series-menu > summary:hover { border-color: var(--accent); }
+  .series-menu > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-weight: 650;
+    font-size: 0.9rem;
+    color: var(--ink);
+  }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+  .pos {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.03em;
+    color: var(--ink-faint);
+    padding-left: 0.6rem;
+    border-left: 1px solid var(--line);
+  }
+  .caret { color: var(--ink-faint); display: grid; place-items: center; transition: transform 0.2s ease; }
+  .caret svg { fill: none; stroke: currentColor; stroke-width: 2; }
+  .series-menu[open] > summary { border-color: var(--accent); }
+  .series-menu[open] > summary .caret { transform: rotate(180deg); }
+
+  .menu-list {
+    position: absolute;
+    z-index: 30;
+    top: calc(100% + 0.35rem);
+    left: 0;
+    min-width: min(24rem, 82vw);
+    max-height: 60vh;
+    overflow-y: auto;
+    margin: 0;
+    padding: 0.3rem;
+    list-style: none;
+    counter-reset: none;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--paper-raised);
+    box-shadow: 0 8px 28px rgb(0 0 0 / 0.12);
+  }
+  .menu-list li { margin: 0; }
+  .menu-list a {
+    display: flex;
+    align-items: baseline;
+    gap: 0.7rem;
+    padding: 0.5rem 0.6rem;
+    border-radius: calc(var(--radius-sm) - 2px);
+    text-decoration: none;
+    color: var(--ink-soft);
+    transition: background 0.12s ease, color 0.12s ease;
+  }
+  .menu-list a:hover { background: var(--paper-sunk); color: var(--ink); }
+  .menu-list .pl {
+    flex: 0 0 3.4rem;
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    color: var(--accent);
+    white-space: nowrap;
+  }
+  .menu-list .pt { font-size: 0.9rem; line-height: 1.3; }
+  .menu-list .here a { background: var(--paper-sunk); color: var(--ink); font-weight: 600; }
+  .menu-list .here .pt::after { content: ' ·  current'; color: var(--ink-faint); font-weight: 400; font-size: 0.8em; }
+
+  /* ---- prev / next ---- */
+  .turns { display: flex; flex: 1 1 auto; gap: 0.6rem; min-width: 0; }
+  .turn {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+    flex: 1 1 0;
+    min-width: 0;
+    padding: 0.45rem 0.8rem;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--paper-raised);
+    text-decoration: none;
+    color: inherit;
+    transition: border-color 0.15s ease, background 0.15s ease;
+  }
+  .turn:hover { border-color: var(--accent); background: var(--paper-sunk); }
+  .turn.next { text-align: right; }
+  .turn.empty { visibility: hidden; border: none; background: none; }
+  .dir { font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.04em; color: var(--accent); }
+  .tt {
+    font-size: 0.86rem;
+    color: var(--ink-soft);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  @media (max-width: 48rem) {
+    .series-menu { flex: 1 1 100%; }
+    .series-menu > summary { justify-content: space-between; }
+    .menu-list { min-width: min(24rem, 92vw); }
+    .turn .tt { display: none; }
+    .turn { flex-direction: row; align-items: center; justify-content: center; padding: 0.5rem; }
+  }
+</style>
