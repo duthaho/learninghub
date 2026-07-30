@@ -1,0 +1,46 @@
+---
+title: "The Elasticsearch series: start here"
+subtitle: "Eight short deep-dives that build one mental model of Elasticsearch — from the inverted index to the design calls."
+description: "A guide to the eight-part Elasticsearch deep-dive series: what each part covers, who it's for, and the order to read them in."
+level: "Foundations · Series guide"
+accent: "#0a7ea4"
+readingTime: "3 min read"
+updated: 2026-07-30
+order: 9
+---
+
+Most Elasticsearch tutorials hand you a pile of APIs and hope a mental model
+assembles itself. This series does the opposite. It starts from **one idea — the
+inverted index — and treats almost everything else as a consequence of it**:
+why search is fast, why results come back *ranked*, why a `text` field and a
+`keyword` field behave nothing alike, and why the source of truth still belongs
+in your database.
+
+It's written for a **backend engineer who's fluent in SQL, REST and JSON but new
+to Elasticsearch**. Every idea is hooked onto something you already know — a
+Postgres `products` table, a `WHERE` clause, a `GROUP BY` — and every part ends
+with the one misconception that trips people up in production, not a wall of
+trivia. Read it front to back and you'll be able to make design decisions and
+read other people's Elasticsearch code with confidence.
+
+## The eight parts
+
+1. **[Elasticsearch, from the ground up](/learninghub/elasticsearch-01-mental-model/)** — the inverted index, how it differs from a relational database, and why Elasticsearch complements your database rather than replacing it.
+2. **[Documents, mappings & the shape of your data](/learninghub/elasticsearch-02-documents-and-mappings/)** — field types, `text` vs `keyword`, dynamic vs explicit mapping, CRUD over REST, and why documents are immutable underneath.
+3. **[How Elasticsearch reads text](/learninghub/elasticsearch-03-text-analysis/)** — the analysis pipeline, why the same analyzer runs at index *and* query time, and the silent zero-hit bugs that follow when it doesn't.
+4. **[The Query DSL](/learninghub/elasticsearch-04-query-dsl/)** — `match`, `term` and `bool`, and the crucial split between query context (scored) and filter context (yes/no and cacheable).
+5. **[Why results come back ranked: BM25](/learninghub/elasticsearch-05-relevance-and-bm25/)** — term frequency, rarity and field length, and why `_score` is never comparable across queries.
+6. **[Aggregations: the analytics engine](/learninghub/elasticsearch-06-aggregations/)** — metric vs bucket aggregations, nesting, and why you aggregate on `keyword`, never analyzed `text`.
+7. **[Running at scale](/learninghub/elasticsearch-07-scale-and-the-write-path/)** — shards, replicas and cluster health, plus the write path: the bulk API, and refresh vs flush vs translog.
+8. **[When to reach for Elasticsearch](/learninghub/elasticsearch-08-design-decisions/)** — what it's great at, what it isn't, the database-plus-Elasticsearch architecture, and the anti-patterns to avoid.
+
+## How to read it
+
+Parts 1–3 are the foundation — the mental model, the data model, and how text
+becomes searchable terms. Don't skip them; the rest leans on them constantly.
+Parts 4–6 are the working surface you'll use daily: querying, relevance, and
+analytics. Parts 7–8 are the operational and design judgment that turn "I can
+run a query" into "I can decide where Elasticsearch belongs."
+
+> Everything version-sensitive here was checked against Elasticsearch 9.x; the
+> concepts are stable across 8.x and 9.x. Start with [Part 1](/learninghub/elasticsearch-01-mental-model/).

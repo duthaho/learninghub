@@ -1,0 +1,202 @@
+---
+title: "When to reach for Elasticsearch (and when not to)"
+subtitle: "Fluency isn't reciting features — it's knowing which parts of a system are a search problem and which are a system-of-record problem."
+description: "A decision guide for Elasticsearch: what it's genuinely great at, what it's a poor fit for, the standard database-plus-Elasticsearch architecture, and the anti-patterns to avoid."
+level: "Intermediate · Design judgment"
+accent: "#be123c"
+readingTime: "11 min read"
+updated: 2026-07-30
+order: 17
+---
+
+import Callout from '../../components/Callout.astro';
+
+*Elasticsearch deep-dive · Part 8 of 8. Previous: [Running at scale](/learninghub/elasticsearch-07-scale-and-the-write-path/).*
+
+Seven parts in, you can describe the inverted index, tune an analyzer, write a
+`bool` query, reason about BM25, build an aggregation, and shard a cluster. But
+fluency was never about reciting features. The engineer who actually helps their
+team is the one who, standing in front of a new requirement, knows **when to
+reach for Elasticsearch and when to walk away from it.**
+
+Every earlier part was quietly building toward one decision. When a feature lands
+on your desk, you're really asking a single question: *does the shape of this
+problem match what Elasticsearch is good at?* This finale ties the series
+together around that question — and gives you a table you can hold up against
+your own stack.
+
+## What Elasticsearch is genuinely great at
+
+Three problem shapes fit Elasticsearch so well that reaching for it is almost
+always the right call.
+
+**Full-text search.** This is the reason Elasticsearch exists. The inverted index
+turns "find documents containing these words" into a lookup instead of a scan
+([Part 1](/learninghub/elasticsearch-01-mental-model/)), and BM25 ranks the
+matches by relevance so the best result comes back first
+([Part 5](/learninghub/elasticsearch-05-relevance-and-bm25/)). Nothing in a
+relational database competes here. `LIKE '%term%'` can't rank, can't handle
+typos, can't tokenise, and can't use an index for a leading wildcard. When the
+requirement is "a search box that feels like Google," this is home ground.
+
+**Analytics over large data.** Aggregations run fast over enormous document sets
+([Part 6](/learninghub/elasticsearch-06-aggregations/)): faceted search sidebars,
+metrics dashboards, "top N" breakdowns, date histograms. The same columnar
+structures that make search fast make bucketing and metric computation fast, so
+you can slice millions of documents in near-interactive time.
+
+**Logs and observability.** The classic ELK use case. Log and event data is
+append-mostly, time-based, enormous in volume, and needs to be both searched
+("find this error string") and aggregated ("errors per minute by service"). That
+plays directly to Elasticsearch's strengths in bulk ingest and time-based
+sharding ([Part 7](/learninghub/elasticsearch-07-scale-and-the-write-path/)) —
+which is why observability stacks were one of its first mass adoptions.
+
+## What Elasticsearch is not
+
+The failures come from asking Elasticsearch to be things it was never built to be.
+
+**Not a system of record.** There are no ACID transactions and no multi-document
+atomicity ([Part 1](/learninghub/elasticsearch-01-mental-model/)). You cannot
+wrap "debit this account, credit that one" in a transaction that either fully
+happens or fully doesn't. Two writers updating the same document can lose a race
+in ways a relational database's row locks and transactions would prevent. If
+correctness under concurrent writes is the requirement, Elasticsearch is the
+wrong tool.
+
+**Near-real-time, not real-time.** New documents become searchable after a
+refresh — roughly a second by default ([Part 7](/learninghub/elasticsearch-07-scale-and-the-write-path/)).
+For a search index that lag is invisible and completely fine. For a
+read-your-write flow — "I just saved this, now show it to me" — that same lag is
+a bug. Elasticsearch makes writes *durable* quickly, but *visible to search*
+only after the next refresh.
+
+**Weak at heavy updates.** Segments are immutable, so an update is really a
+delete-and-reindex of the *whole* document ([Part 2](/learninghub/elasticsearch-02-documents-and-mappings/)) —
+even to change one field. A dataset that mutates constantly generates a churn of
+deleted documents and merge pressure, fighting the very model that makes reads
+fast. High-frequency mutation is exactly the workload Elasticsearch handles
+worst.
+
+**No true joins.** There is no relational integrity and no `JOIN` across indices.
+The workarounds — denormalise at index time, `nested` documents, or `join`
+fields — each carry real costs and real limits. If the value of your data lives
+in rich relationships between entities, that is a relational job, not a search
+one.
+
+## The standard architecture
+
+<Callout type="insight" title="Elasticsearch complements the database; it rarely replaces it">
+  Keep your **source of truth** in a transactional database — Postgres, MySQL —
+  and sync a **denormalised copy** into Elasticsearch for the search and analytics
+  layer. The database owns writes, transactions, and relationships; Elasticsearch
+  owns fast text search and aggregation over a read-optimised projection of that
+  data. This isn't a compromise; it's the design most production search systems
+  converge on.
+</Callout>
+
+This pattern is why the earlier parts kept pointing at it. Using your database
+primary key as the Elasticsearch `_id` ([Part 2](/learninghub/elasticsearch-02-documents-and-mappings/))
+lets a sync process upsert a row into its matching document idempotently. Bulk
+indexing ([Part 7](/learninghub/elasticsearch-07-scale-and-the-write-path/)) is
+the efficient way to push those changes across. Those weren't isolated tips —
+they're the glue of exactly this architecture.
+
+Two mechanisms are common for keeping the copy fresh:
+
+- **Change data capture (CDC).** Tail the database's write-ahead log or a change
+  stream and translate each row change into an index or delete. This keeps
+  Elasticsearch close to real-time and captures every write, including ones your
+  application didn't make directly.
+- **Scheduled bulk jobs.** A periodic job re-reads changed rows (by an
+  `updated_at` watermark, say) and bulk-indexes them. Simpler to build and
+  operate, at the cost of a staleness window between runs.
+
+CDC when freshness matters; scheduled bulk when simplicity wins. Either way, the
+database stays the truth and Elasticsearch stays a derived view.
+
+## A decision table (your stack)
+
+Picture a typical product app on Postgres. Here's how the features sort
+themselves once you ask "search problem or system-of-record problem?"
+
+| Feature | Elasticsearch? | Why |
+|---------|:---:|-----|
+| User login / account balance | **No** | Needs ACID, transactions, read-your-write. Pure Postgres. |
+| Product search box (typo-tolerant, ranked) | **Yes** | Full-text plus relevance — Elasticsearch's core strength. Sync products from Postgres. |
+| "Orders per day" analytics dashboard | **Yes** | Aggregations over many documents: `date_histogram` plus metric sub-aggregations. |
+| Application / access logs, searchable | **Yes** | Classic ELK: high-volume, append-mostly, searched *and* aggregated. |
+| Shopping cart (mutated on every click) | **No** | High-churn updates fight immutable segments; needs transactional consistency. |
+| Authoritative inventory count | **No** | System-of-record plus concurrency correctness → Postgres owns it. Elasticsearch may hold a synced copy for display and search only. |
+
+The one-line takeaway: **Elasticsearch for the search, read, and analytics
+surface; the database for the truth and the transactions.**
+
+## Anti-patterns to recognise
+
+You'll meet these in your own systems and in others'. Learning to spot them by
+their tell is half the skill.
+
+1. **Elasticsearch as the primary datastore.** Data lives *only* in Elasticsearch,
+   with no other database behind it. That's a data-loss risk — no ACID means no
+   safe transactions — and it makes joins and mutations painful. The tell is an
+   architecture diagram with no database in it.
+2. **Oversharding.** Too many tiny shards ([Part 7](/learninghub/elasticsearch-07-scale-and-the-write-path/))
+   exhaust heap with per-shard overhead and slow every query, since each shard is
+   searched separately. It's hard to undo — shard count is fixed at index
+   creation, so fixing it means a reindex.
+3. **`text` where you needed `keyword`.** The most common mapping mistake
+   ([Parts 2](/learninghub/elasticsearch-02-documents-and-mappings/) and
+   [6](/learninghub/elasticsearch-06-aggregations/)). Analysed `text` doesn't
+   support sorting, exact filtering, or aggregation the way you expect — it
+   silently misbehaves or errors, because the field was tokenised instead of kept
+   whole.
+4. **Ignoring bulk per-item errors.** A bulk request can return HTTP 200 while
+   *individual* items failed ([Part 7](/learninghub/elasticsearch-07-scale-and-the-write-path/)).
+   Treat the 200 as "all indexed" and you silently drop documents. You have to
+   inspect the `errors` flag and each item's status.
+5. **Using Elasticsearch for high-frequency updates.** Hammering the
+   delete-and-reindex model with constant mutations instead of reaching for a
+   store built for it. The database (or Redis, or a queue) is the right home for
+   data that changes every few seconds.
+
+## The meta-misconception
+
+<Callout type="gotcha" title="'Elasticsearch is just a faster, more flexible database'">
+  This one sentence sits underneath most Elasticsearch disasters: *"It's a faster,
+  more flexible database, so it can replace my relational database."* It can't —
+  they solve different problems. The database owns **correctness, transactions,
+  and relationships**. Elasticsearch owns **search and analytics at scale.**
+  They're complements, not substitutes. The moment you treat one as a drop-in for
+  the other, you inherit exactly the weaknesses it was never designed to cover.
+</Callout>
+
+The fluent engineer doesn't frame the decision as "database *or* Elasticsearch?"
+That question has no good answer because it assumes a substitution that isn't
+real. The better question is: **which parts of this system are a search or
+analytics problem — and should therefore live in Elasticsearch, synced from the
+database — and which parts are a system-of-record problem, and should therefore
+live in the database?** Getting that split right, feature by feature, is the
+whole game. Everything else is detail.
+
+## The series, in one place
+
+Eight parts, in order — so this finale doubles as a map of the whole deep-dive:
+
+1. [Elasticsearch, from the ground up](/learninghub/elasticsearch-01-mental-model/)
+2. [Documents, mappings & the shape of your data](/learninghub/elasticsearch-02-documents-and-mappings/)
+3. [How Elasticsearch reads text](/learninghub/elasticsearch-03-text-analysis/)
+4. [The Query DSL](/learninghub/elasticsearch-04-query-dsl/)
+5. [Why results come back ranked: BM25](/learninghub/elasticsearch-05-relevance-and-bm25/)
+6. [Aggregations: the analytics engine](/learninghub/elasticsearch-06-aggregations/)
+7. [Running at scale](/learninghub/elasticsearch-07-scale-and-the-write-path/)
+8. When to reach for Elasticsearch *(this article)*
+
+Each part was a piece of the same picture: the index and analysis parts told you
+*what search can do*, the relevance and aggregation parts told you *how well it
+does it*, and the scale part told you *what it costs to run*. This part turns all
+of that into judgment.
+
+> If, for any feature on your desk, you can say which parts belong in
+> Elasticsearch and which belong in your database — and *why* — you have the
+> fluency this series set out to build.

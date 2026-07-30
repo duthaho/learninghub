@@ -1,0 +1,222 @@
+---
+title: "Documents, mappings & the shape of your data"
+subtitle: "Elasticsearch has a schema after all — you just don't always see it being written."
+description: "How Elasticsearch models data: documents, indices, mappings and field types, dynamic vs explicit mapping, CRUD over REST, and why documents are immutable under the hood."
+level: "Foundations · Beginner-friendly"
+accent: "#0891b2"
+readingTime: "13 min read"
+updated: 2026-07-30
+order: 11
+---
+
+import Callout from '../../components/Callout.astro';
+
+*Elasticsearch deep-dive · Part 2 of 8. Previous: [Elasticsearch, from the ground up](/learninghub/elasticsearch-01-mental-model/) · Next: [How Elasticsearch reads text](/learninghub/elasticsearch-03-text-analysis/).*
+
+In Part 1 we drew the rough equivalence: an index is roughly a table, and a document is roughly a row. That gets you oriented, but it dodges the question a backend engineer asks next. When you send Elasticsearch a lump of JSON, how does it know that `name` is searchable text, `price` is a number you can sort and filter on ranges, and `created_at` is a date it can bucket by month? A relational database knows because you wrote `CREATE TABLE` first. Elasticsearch knows because of the **mapping** — and the twist is that it will happily write that mapping for you, from the first document you send, whether you meant it to or not.
+
+Throughout this part we'll keep one concrete scenario in mind: a `products` index, a catalog synced out of a Postgres table that is your source of truth. Everything — the field types, the CRUD calls, the sync strategy — hangs off that.
+
+## The mapping is the schema
+
+A **mapping** is the definition of each field in an index: its name, its type, and how Elasticsearch indexes it. It is the schema. The reason it feels invisible is that you rarely write it by hand — but it is always there, and you can read it back at any time.
+
+The mapping's real job is to turn raw JSON into the right *internal structures*. Text destined for full-text search goes into an **inverted index** (the term-to-document map we met in Part 1). Numbers and dates go into structures optimised for range queries and sorting. Booleans, keywords, geo-points — each type has machinery behind it. The mapping is what routes a field to the correct machinery.
+
+Here are the field types you'll reach for most, with the SQL analogy each one maps to:
+
+| ES field type | SQL analogy | Use it for |
+|---------------|-------------|------------|
+| `text` | `TEXT` you run full-text search over | Prose you search: product names, descriptions, reviews |
+| `keyword` | `VARCHAR` used in `=`, `GROUP BY`, `ORDER BY` | Exact strings: ids, SKUs, tags, status, email |
+| `integer` / `long` | `INT` / `BIGINT` | Whole numbers you filter, sort, or do math on |
+| `float` / `double` / `scaled_float` | `DECIMAL` / `NUMERIC` | Prices, ratings, measurements |
+| `date` | `TIMESTAMP` | Timestamps you range-filter and bucket by time |
+| `boolean` | `BOOLEAN` | Flags like `in_stock` |
+| `object` / `nested` | Embedded JSON | Structured sub-documents (no clean SQL analogy) |
+
+Most of these behave the way your SQL intuition expects. The one distinction that trips up every newcomer — and the one worth burning into memory — is **`text` vs `keyword`**.
+
+Take the string `"Wireless Keyboard"`. Map it as `text` and Elasticsearch **analyses** it: it breaks the string into terms, lowercases them, and stores `[wireless, keyboard]` in the inverted index. That's exactly what you want for search — a user typing "wireless" finds the product — but it's useless for exact work. You can't reliably group by it, sort by it, or match the whole phrase as one atomic value, because the original string was shredded into pieces.
+
+Map that same string as `keyword` and Elasticsearch stores it as **one exact token**: `"Wireless Keyboard"`, untouched, case and spaces intact. Now it's perfect for filters (`status = "shipped"`), for aggregations (count products per brand), and for sorting — but you *can't* do partial full-text search on it. Searching "wireless" will not match `"Wireless Keyboard"`, because as far as the keyword field is concerned, the only term that exists is the whole string.
+
+<Callout type="insight" title="text vs keyword is just two analyzers on one string">
+  It looks like two different data types, but underneath it's the same string
+  run through two different **analyzers**. `text` uses an analyzer that splits
+  and lowercases into searchable terms; `keyword` uses an analyzer that does
+  nothing at all — it keeps the string whole as a single term. Same input,
+  different processing, and every behavioural difference (searchable vs
+  groupable, partial vs exact) falls out of that one choice. We unpack *how*
+  analysis actually works in [Part 3](/learninghub/elasticsearch-03-text-analysis/);
+  for now, hold the reframe: not two types, two treatments.
+</Callout>
+
+## Dynamic vs explicit mapping
+
+There are two ways a field ends up in the mapping.
+
+**Dynamic mapping** is the default, and it's the source of that "invisible schema" feeling. Index a document into an index that has no mapping for a field, and Elasticsearch **guesses** the type from the value in front of it. It's `CREATE TABLE` happening automatically from your first `INSERT` — you never wrote the schema, but a schema got written.
+
+Watch it happen. Index one product, then read the mapping back:
+
+```bash
+POST /products/_doc/1
+{
+  "name": "Wireless Keyboard",
+  "sku": "MX-01",
+  "price": 99.99,
+  "in_stock": true,
+  "created_at": "2026-07-30T10:00:00Z"
+}
+
+GET /products/_mapping
+```
+
+Elasticsearch infers: `price` → `float`, `in_stock` → `boolean`, `created_at` → `date`. And the strings? This is the detail that surprises people: a dynamically-mapped string becomes **two fields at once** — a `text` field *and* a `keyword` sub-field:
+
+```json
+{
+  "name": {
+    "type": "text",
+    "fields": {
+      "keyword": { "type": "keyword", "ignore_above": 256 }
+    }
+  }
+}
+```
+
+So `name` is full-text searchable and `name.keyword` is available for filtering, sorting, and aggregations. That's genuinely convenient — you get both behaviours for free without deciding anything. The cost is that you now store every string twice, and you've let Elasticsearch *guess* types for fields you may care about deeply.
+
+**Explicit mapping** is you taking the wheel. You `PUT` the index with the mapping spelled out before any data arrives:
+
+```json
+PUT /products
+{
+  "mappings": {
+    "properties": {
+      "name":       { "type": "text" },
+      "sku":        { "type": "keyword" },
+      "price":      { "type": "scaled_float", "scaling_factor": 100 },
+      "in_stock":   { "type": "boolean" },
+      "created_at": { "type": "date" }
+    }
+  }
+}
+```
+
+Every choice here is deliberate. `name` is `text` because you search it. `price` is `scaled_float` (a float stored as a scaled integer — a tidy fit for money) and could equally be `float`. And `sku` is `keyword`, not `text`, because you will only ever filter it exactly — `sku = "MX-01"` — and never run a full-text search over it. A SKU has no words to analyse; treating it as `keyword` keeps it exact, cheap, and aggregatable. That's a design decision, made once, on purpose, rather than left to a guess.
+
+## You can't change a field's type
+
+Explicit mapping isn't just tidiness. It's insurance against a limitation that catches people badly.
+
+<Callout type="gotcha" title="Field types are set for the life of the index">
+  Once a field is mapped in an index, **you cannot change its type.** Suppose
+  the first document your sync job ever sent had `"price": "99.99"` — a string,
+  because someone forgot to cast it. Dynamic mapping maps `price` as `text`
+  forever. You cannot later flip it to `float`. Range queries and numeric sorts
+  on `price` are now broken, and no `PUT` will fix the existing field. The only
+  cure is to create a **new index** with the correct mapping and **reindex** the
+  data into it (Elasticsearch has a `_reindex` API for exactly this). This is the
+  whole argument for explicit mappings on anything you care about — a wrong
+  first guess is expensive to undo.
+</Callout>
+
+Two clarifications, because this is easy to over-read. You **can** add brand-new fields to an existing index at any time — send a document with a field nobody's seen before and it gets mapped on the spot. What you can't do is *change the type of a field that already exists*. Adding is free; mutating is not.
+
+## CRUD over REST — and a twist
+
+Every document lives at a predictable address: `/<index>/_doc/<id>`. Think of the trio — index, `_doc`, id — as a primary key scoped to a table. The index picks the "table", the id is the key within it.
+
+**Create** comes in two flavours, and the difference matters more than it looks.
+
+```bash
+# You supply the id → create-or-replace, idempotent
+PUT /products/_doc/1
+{ "name": "Wireless Keyboard", "sku": "MX-01", "price": 99.99 }
+
+# No id → Elasticsearch generates one → a NEW document every call
+POST /products/_doc
+{ "name": "Wireless Keyboard", "sku": "MX-01", "price": 99.99 }
+```
+
+Run the `PUT` three times and you still have one document (id `1`), each call overwriting the last. Run the `POST` three times and you have three documents with three random ids. Hold that thought — it comes back to bite in a moment.
+
+A note on vocabulary while we're here: Elasticsearch uses "index" as a **verb**. To *index a document* means to store it. It's an unfortunate collision with "index" the noun (the table-like container), and reading the docs is smoother once you know both meanings are in play.
+
+**Read** by id is a `GET`:
+
+```bash
+GET /products/_doc/1
+```
+
+And this call has a property that will save you real debugging time: **`GET` by id is real-time.** It reads from the in-memory buffer, so it sees a document the instant it's written — it is *not* subject to the ~1-second refresh delay we flagged in Part 1. That "I just indexed it and I can't find it!" moment only bites `_search`, which waits for a refresh before a new document becomes visible. Fetch the same document by its id and it's there immediately. If you can `GET` it but `_search` can't find it yet, you're not losing data — you're waiting on a refresh.
+
+**Update** is a partial patch:
+
+```bash
+POST /products/_update/1
+{ "doc": { "price": 89.99 } }
+```
+
+You send only the changed fields; Elasticsearch merges them into the existing document. (What actually happens underneath is more interesting than "merge" — see the next section.)
+
+**Delete** is what you'd guess:
+
+```bash
+DELETE /products/_doc/1
+```
+
+And running through all of it is a `_version` number that increments on every write to a document. That's your handle for **optimistic concurrency**: read a document, note its `_seq_no` and `_primary_term`, and send them back with `if_seq_no` / `if_primary_term` on your write. If someone else changed the document in between, your write is rejected instead of silently clobbering theirs — exactly like an optimistic-lock version column in a relational table.
+
+## Documents are immutable underneath
+
+Here's the mechanical truth behind that "update" call, and it explains a surprising amount of Elasticsearch's behaviour.
+
+The inverted index lives in **Lucene segments** — files on disk — and those segments **cannot be modified in place.** Once written, a segment is immutable. So there is no such thing as editing a document where it sits. An "update" is really a small dance:
+
+1. Fetch the current document.
+2. Apply your changes in memory to build the *new* full document.
+3. **Re-index the entire new document** as a fresh one.
+4. Mark the old version as deleted (a tombstone; the space is reclaimed later during segment merges).
+
+<Callout type="insight" title="Every update is a delete-and-reinsert">
+  There is no in-place edit anywhere in Elasticsearch. Changing one field of a
+  large document rewrites the whole document and tombstones the old copy. This is
+  why Elasticsearch is a poor fit for **heavy-update workloads** — a counter you
+  bump thousands of times a second, say — where each tiny change forces a full
+  re-index. It's built to index once and read many, not to churn. We come back to
+  this design point in Part 8 when we talk about what Elasticsearch is and isn't
+  for.
+</Callout>
+
+## The PUT-vs-POST trap
+
+Now the two `Create` flavours collide with the real world, and the result is a classic production mess.
+
+<Callout type="gotcha" title="POST /_doc silently fills your index with duplicates">
+  `POST /products/_doc` (no id) run three times creates **three** documents —
+  Elasticsearch mints a fresh id each call. `PUT /products/_doc/1` run three
+  times leaves **one** document, because you named the id and each call overwrites
+  the last. When you're syncing from Postgres, this is the whole ballgame: use
+  **`PUT` with your database's primary key as the Elasticsearch id.** Then
+  re-syncing a row — because a nightly job reran, or a change-data-capture event
+  replayed — *updates the same document in place* instead of spawning a copy.
+  Reach for `POST` in a sync loop and every replay quietly doubles your data,
+  with no error to warn you. The catalog just slowly fills with dupes until
+  someone notices the counts don't match Postgres.
+</Callout>
+
+The rule that falls out of this is short: **let your source of truth own the id.** If a product is row `4217` in Postgres, it's document `4217` in Elasticsearch. Idempotent sync, no duplicates, and re-running the sync is always safe.
+
+## Where this goes next
+
+We keep circling one unanswered question: *what does "analysed" actually mean?* We've said `text` gets split and lowercased into terms while `keyword` is left whole, and that this single choice decides everything about how a field behaves. That's the promise Part 3 pays off.
+
+[**How Elasticsearch reads text**](/learninghub/elasticsearch-03-text-analysis/) opens up the analyzer: how a string becomes tokens, what the standard analyzer does to your product names, and why the *same* query text has to go through the *same* analysis as the indexed text for a match to happen. It's the *why* underneath the `text`-vs-`keyword` rule you just learned to apply.
+
+> If you can explain why you `PUT` with the Postgres id instead of `POST`, and
+> why a wrong first-guess type means a full reindex rather than an `ALTER TABLE`,
+> you already understand how Elasticsearch shapes your data better than most
+> people who ship to it daily.

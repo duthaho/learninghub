@@ -1,0 +1,188 @@
+---
+title: "Running at scale: shards, replicas & the write path"
+subtitle: "How one index survives a billion documents and a dead machine — and what 'near real-time' actually is, mechanically."
+description: "Elasticsearch distributed architecture and write path: primary shards and replicas, cluster health colours, the bulk API and its partial-success trap, and refresh vs flush vs translog."
+level: "Intermediate · Operations"
+accent: "#475569"
+readingTime: "14 min read"
+updated: 2026-07-30
+order: 16
+---
+
+import Callout from '../../components/Callout.astro';
+
+*Elasticsearch deep-dive · Part 7 of 8. Previous: [Aggregations: the analytics engine](/learninghub/elasticsearch-06-aggregations/) · Next: [When to reach for Elasticsearch](/learninghub/elasticsearch-08-design-decisions/).*
+
+Everything in this series so far has quietly run on **one index**, and you've been picturing it as a single thing sitting on a single machine. That picture is fine for learning queries and mappings. It falls apart the moment someone asks the two questions that actually decide whether Elasticsearch stays up in production: how does one index hold **a billion documents** when no single machine has the RAM or disk for it — and what happens when one of those machines simply **dies** at 3am?
+
+The answer to both is that Elasticsearch is **distributed**. It doesn't keep your index on one box; it spreads the data across many machines and coordinates them so the whole thing looks like one index to you. If you've run containers or clusters before — Kubernetes, a database replica set, anything with more than one node — the shape will feel familiar. Four terms, built up from the bottom.
+
+## Shards, replicas, nodes, cluster
+
+**A primary shard is the unit of scaling.** When you create an index, Elasticsearch doesn't store it as one blob — it *splits* it into shards. The crucial thing to internalise: **each shard is itself a complete, self-contained Lucene index** — a full inverted index with its own segments, exactly like the one from the earlier parts of this series. An index isn't "one Lucene index cut into pieces"; it's *N* independent Lucene indices that Elasticsearch presents as one. Split an index into 5 primaries and spread them across 5 machines and you have **horizontal scaling**: five machines' worth of RAM, CPU, and disk working one index.
+
+Every document lives in **exactly one** primary shard. Which one isn't random — Elasticsearch hashes the document's id:
+
+```text
+shard = hash(_id) % number_of_primaries
+```
+
+That formula is how a search knows where a document is, and (as you'll see) it's also the reason one number can never change.
+
+**A replica is a copy of a shard.** It does two jobs. First, **failover**: if the node holding a primary dies, Elasticsearch promotes one of that shard's replicas to be the new primary — no data lost, no downtime for that shard. Second, **read scaling**: a search for a given shard can be served by the primary *or* any of its replicas, so more replicas means more machines answering reads in parallel. One hard rule governs placement: **a replica is never put on the same node as its primary.** A copy that dies with the original is not a copy.
+
+**A node is a single Elasticsearch process** — one server, one JVM — that holds some shards. **A cluster is a set of nodes working together**, coordinating which shards (primary and replica) live on which node, and reshuffling them when nodes join or leave. You talk to any node; it routes your request to wherever the data actually is.
+
+## Fixed vs flexible
+
+Two settings control this, and they behave completely differently — which one you can change later is the single most important operational fact in this whole article.
+
+<Callout type="insight" title="One number is carved in stone, the other is a dial">
+  `number_of_shards` — the count of **primaries** — is **fixed at index creation**. You cannot change it later without reindexing into a new index. The reason is the routing formula: `hash(_id) % number_of_primaries`. Change the divisor and *every existing document* would now hash to a different shard than the one it's actually stored in — lookups would miss, and the index would be corrupt. Since ES 7.0 the default is **1 primary shard**.
+
+  `number_of_replicas` is the opposite — **changeable anytime, live.** Dial it up when you need more read capacity or more redundancy; dial it down to reclaim disk. No reindex, no downtime. It's a runtime knob.
+</Callout>
+
+The mental shortcut: **decide your primary count carefully once; treat replicas as a slider you adjust forever.**
+
+## Cluster health colours
+
+Walk through what actually happens when you create an index, because it explains the colour your cluster reports and why a fresh single-node dev box is almost always "yellow."
+
+```json
+PUT /products
+{
+  "settings": {
+    "number_of_shards": 3,
+    "number_of_replicas": 1
+  }
+}
+```
+
+You've asked for 3 primaries and 1 replica *of each*, so Elasticsearch has **6 shards to place**: 3 primaries + 3 replicas. On a **1-node** dev laptop it assigns the 3 primaries with no problem — but the 3 replicas have nowhere to go, because a replica can't sit on the same node as its primary and there's no second node. Those 3 replicas stay **unassigned**, and the cluster reports **yellow**.
+
+Add a **second node** and the cluster immediately places the 3 replicas there — now all 6 shards are assigned and health goes **green**. And the payoff: if a node now dies, its shards exist as copies on the other node, so Elasticsearch promotes the surviving replicas to primaries and **keeps serving with no data lost**.
+
+| Colour | What it means | Severity |
+|--------|---------------|----------|
+| **green** | All primaries **and** all replicas assigned | Fine — full redundancy |
+| **yellow** | All primaries assigned, but ≥1 replica **unassigned** | Data is safe and fully searchable; redundancy is reduced |
+| **red** | ≥1 **primary** unassigned | Some data is missing / unsearchable — an incident |
+
+The shortcut worth memorising: **yellow is a redundancy problem, red is a data problem.** Yellow means "you'd lose availability if another node failed." Red means "some of your data is *already* unreachable right now." Yellow can wait until morning; red is a page.
+
+## The oversharding trap
+
+Now the mistake that new cluster designers make almost universally, because the intuition is so reasonable.
+
+<Callout type="gotcha" title="'More shards = faster' — the #1 cluster-design mistake">
+  The reasoning goes: shards enable parallelism, so more shards must mean more speed — I'll create 50 up front to be safe. It bites you two ways.
+
+  **(1) Every shard has fixed overhead.** Remember each shard is a *full Lucene index* — it costs file handles, heap for its segments and metadata, and a slice of cluster-state bookkeeping, *regardless of how little data it holds*. Thousands of tiny shards can exhaust the heap and slow the entire cluster even when the total data is small. Common guidance is to aim for **tens of GB per shard** and to keep the shard count proportional to your heap — not "one shard per anything."
+
+  **(2) A search fans out to every shard.** A query hits **all** shards of the index and then merges the results. More shards means more per-query fan-out and more merging; past a point, *adding* shards makes queries **slower**, not faster.
+
+  And you can't cheaply undo it, because primaries are fixed — an over-sharded index means a **reindex**. So shard for the data size and node count you actually have, not "just in case."
+</Callout>
+
+The fluent stance is boring on purpose: with the ES 7.0+ default of 1 primary and small-to-medium data, you often don't touch the shard count at all until a single shard would grow past the tens-of-GB range.
+
+---
+
+That's the architecture. Now the other half of running at scale: getting data *in* fast, and understanding what "in" even means.
+
+## The bulk API — batch your writes
+
+Here's the scenario this section exists for: you need to **sync 5 million rows from Postgres** into Elasticsearch. The naive approach is one HTTP request per document — `POST /products/_doc/1`, then `/2`, then `/3`. That's fine for a handful of documents and **catastrophic** for volume: each request pays a full network round-trip plus per-request coordination overhead, five million times over. You'll be waiting for days and hammering the cluster with connection churn.
+
+The **bulk API** exists precisely for this. `POST /_bulk` packs many operations — `index`, `create`, `update`, `delete` — into a **single request**, amortizing the round-trip and coordination cost across all of them. This isn't an optimization you reach for occasionally; for loading data it is simply *the* way. Any real ingest path — the Postgres sync, a reindex, a backfill — runs through bulk.
+
+The format has one quirk that surprises everyone the first time. It's **NDJSON** — newline-delimited JSON — and each document takes **two lines**: an *action line* describing what to do, then the *source line* with the document body.
+
+```json
+POST /_bulk
+{ "index": { "_index": "products", "_id": "1" } }
+{ "name": "Widget", "price": 9.99, "in_stock": true }
+{ "index": { "_index": "products", "_id": "2" } }
+{ "name": "Gadget", "price": 14.50, "in_stock": false }
+```
+
+Two things about that format. The body **must end with a trailing newline** — the parser uses it as a delimiter, and omitting it is a classic "why is my last document missing?" bug. And the reason for the two-lines-per-doc design is deliberate: Elasticsearch parses the payload **line by line** rather than loading the whole request as one giant JSON tree, so it can stream a huge batch without holding all of it in memory at once.
+
+## Bulk is partial-success — check every item
+
+This is the trap that silently loses data, and it's worth being blunt about.
+
+<Callout type="gotcha" title="A 200 does not mean 'all indexed'">
+  A bulk request does **not** succeed or fail as a unit. If document #37 hits a mapping conflict, the other 999 in the batch still index just fine — #37 fails **alone**. And here's the part that catches people: the overall **HTTP status is still 200**, even when individual items failed.
+
+  The truth lives in the *response body*, not the status code. Every bulk response carries an **`"errors": true`** flag when any item failed, plus a per-item `items` array where each entry has its own `status` and, on failure, an `error`:
+
+  ```json
+  {
+    "errors": true,
+    "items": [
+      { "index": { "_id": "1", "status": 201 } },
+      { "index": { "_id": "2", "status": 400,
+          "error": { "type": "mapper_parsing_exception" } } }
+    ]
+  }
+  ```
+
+  Treat a 200 as "everything indexed" and you will **silently drop documents** — a data-loss bug that surfaces weeks later as "some records just aren't in search." Production ingest **must** read `errors`, walk the per-item results, and log or retry each failure individually.
+</Callout>
+
+For the Postgres sync, that means your loader can't just fire batches and move on. After each `_bulk` call it inspects `response.errors`; if true, it pulls the failed ids out of the `items` array and decides — retry the transient ones, quarantine and log the genuinely malformed ones. "Fire and forget" is how you end up with a search index that's quietly missing 0.3% of your data.
+
+## Refresh, flush, translog — three different things
+
+These three words get used interchangeably in casual conversation, and that's exactly how people end up confused about durability and visibility. They are **three distinct operations**, and being precise about them is what separates someone who can reason about Elasticsearch from someone who guesses.
+
+<Callout type="insight" title="Visibility, crash-safety, and durability are three separate mechanisms">
+  When you index a document it first lands in an **in-memory buffer** — it is *not* yet in any searchable segment, so a `_search` won't find it.
+
+  **Refresh = visibility.** A refresh takes that buffer and writes it into a **new Lucene segment**, which initially lives in the OS filesystem cache. Search reads segments, so a document only becomes searchable *after a refresh*. The default refresh interval is **1 second** — and that one-second gap between "indexed" and "searchable" is exactly what "**near real-time**" means, mechanically. (Note: a direct `GET /products/_doc/1` bypasses this entirely — it reads the buffer, so *get-by-id* is real-time even though *search* is not.)
+
+  **Translog = crash-safety, immediately.** The translog (transaction log) is **appended on every write** the instant it happens. So if a node crashes after you've indexed but *before* the data reached durable disk segments, Elasticsearch **replays the translog** on restart and nothing is lost.
+
+  **Flush = durability.** A flush is the separate operation that **fsyncs the segments to disk** and then **trims the translog** (its entries are now safely persisted in segments, so they're no longer needed for replay).
+
+  Crisp summary: **refresh** makes data searchable (in the fs cache); the **translog** keeps it crash-safe between flushes; **flush** persists it to disk and trims the log.
+</Callout>
+
+The one sentence to *never* say is "refresh flushes to disk." It doesn't — refresh only moves data into a segment in the filesystem cache and makes it searchable; it says nothing about durability. Durability is flush's job, and crash-safety in the meantime is the translog's job. Conflate refresh and flush and every reasoning-about-data-loss conversation you have afterward will be subtly wrong.
+
+## Tuning a big bulk load
+
+Back to the 5-million-row sync, armed with the write path. Refreshing once per second is great for interactive use, but during a massive load it's **wasteful** — you're building a fresh Lucene segment every second, producing a pile of tiny segments that Elasticsearch then has to merge together later. And every replica has to index every document too, doubling (or more) the write work while the load runs.
+
+The standard recipe is to **turn both off during the load and restore them after**. Disable auto-refresh by setting `refresh_interval` to `-1`, and drop `number_of_replicas` to `0` so only primaries do the indexing work:
+
+```bash
+# 1. Before the load: disable refresh, drop replicas.
+PUT /products/_settings
+{ "index": { "refresh_interval": "-1", "number_of_replicas": 0 } }
+
+# 2. Stream the Postgres rows in batches of ~5000 via _bulk,
+#    using the Postgres primary key as _id (Part 2's PK-as-_id).
+#    CHECK response.errors on EVERY batch — see the gotcha above.
+POST /_bulk
+{ "index": { "_index": "products", "_id": "42" } }
+{ "name": "Widget", "price": 9.99 }
+# ...4999 more documents...
+
+# 3. After the load: restore refresh and replicas, then refresh once.
+PUT /products/_settings
+{ "index": { "refresh_interval": "1s", "number_of_replicas": 1 } }
+POST /products/_refresh
+```
+
+The trade you're making is explicit: with refresh disabled the newly-loaded documents **aren't searchable until step 3**, and with replicas at 0 you have **no redundancy during the load**. In exchange you get a large throughput gain and a clean set of segments — the "load 10 million documents without melting the cluster" pattern. Restoring replicas afterward lets Elasticsearch copy the finished primaries across nodes in one efficient pass instead of indexing every document twice as it arrives.
+
+Notice how much of this reuses earlier parts: **PK-as-`_id`** (Part 2) so re-running the sync updates rather than duplicates, **replicas** for the redundancy you restore at the end, and **refresh** for the visibility you deliberately traded away and then bought back.
+
+## Where this goes next
+
+You now have the operational half of Elasticsearch: how an index survives scale and machine death, and exactly what happens to a document between "indexed" and "searchable and durable." The final part, [Part 8: design decisions](/learninghub/elasticsearch-08-design-decisions/), steps back from mechanics to judgement — *when* Elasticsearch is the right tool at all, and when reaching for it is a mistake.
+
+> If you can explain why a fresh single-node cluster is yellow rather than green, and state the difference between refresh, flush, and the translog without conflating any two of them, you understand how Elasticsearch actually runs — not just how to query it.

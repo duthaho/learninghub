@@ -1,0 +1,232 @@
+---
+title: "Elasticsearch, from the ground up"
+subtitle: "One data structure — the inverted index — and why it explains what Elasticsearch is good at, and what it is not."
+description: "A mental-model-first introduction to Elasticsearch: the inverted index, how it differs from a relational database, and why it complements your database rather than replacing it."
+level: "Foundations · Beginner-friendly"
+accent: "#0a7ea4"
+readingTime: "11 min read"
+updated: 2026-07-30
+order: 10
+---
+
+import Callout from '../../components/Callout.astro';
+
+*Elasticsearch deep-dive · Part 1 of 8. Next: [Documents, mappings & the shape of your data](/learninghub/elasticsearch-02-documents-and-mappings/).*
+
+Most people meet Elasticsearch as one of two things: "the search box" behind a
+site's search bar, or "a fast JSON store" they can throw documents at. Both are
+true, and both hide the one idea that makes the whole system click.
+
+Here's the sentence to hold onto: **Elasticsearch is a distributed document store
+built around an inverted index.** Two ideas live in there. First, it stores JSON
+*documents*, and an *index* is a collection of similar documents — roughly a SQL
+table. Second, the *inverted index* is the data structure that makes search fast.
+Almost everything Elasticsearch is good at, and almost everything it's bad at,
+falls out of that second idea.
+
+We'll hang every example on something you already know: a `products` table in
+Postgres for an e-commerce store, and the copy of it you sync into Elasticsearch
+for search.
+
+## The inverted index — the whole trick
+
+Start with how a relational database thinks. Postgres stores your `products`
+data **row by row**. Each row is a product: its name, its description, its price,
+sitting together on disk. That layout is perfect for "give me the row with
+`id = 42`" or "sum the prices" — but it's the wrong shape for text search.
+
+Ask Postgres this:
+
+```sql
+SELECT * FROM products WHERE description LIKE '%wireless%';
+```
+
+To answer it, the database has to walk **every row** and check whether the text
+contains that substring. It's a full scan, it can't use a normal B-tree index,
+and it only gets slower as your catalog grows. Worse, it's doing dumb substring
+matching — it has no idea that `wireless` is a word.
+
+An inverted index flips the problem inside out. When Elasticsearch indexes a
+document, it doesn't just store the text — it **breaks the text into terms** and
+builds a map from each term to the list of document IDs that contain it. For a
+handful of product descriptions, that map might look like:
+
+```
+wireless  →  [doc1, doc7, doc42]
+keyboard  →  [doc1, doc9]
+mechanical →  [doc9, doc42]
+mouse     →  [doc7]
+```
+
+Now "find documents containing `wireless`" is not a scan at all. It's a single
+dictionary lookup — you go straight to the `wireless` row and read off
+`[doc1, doc7, doc42]`. It's the same trick as the index at the back of a
+textbook: you don't read every page looking for a word, you look the word up and
+it tells you the pages.
+
+That's the whole idea. The name even says it: a normal database maps *document →
+its words*; an inverted index maps *word → its documents*. Inverting that
+relationship is what turns text search from a scan into a lookup.
+
+<Callout type="insight" title="Why search comes back ranked, not yes/no">
+  The inverted index doesn't just tell you *which* documents contain a term — it
+  tracks *how often* and *where*, across the whole collection. So Elasticsearch
+  can score each matching document and return them **ordered by relevance**, not
+  as a flat yes/no match. That's the deeper reason it beats `LIKE`: a `LIKE` query
+  can only say "this row matches or it doesn't." An inverted index can say "these
+  50 documents match, and here's the best one first." Ranking isn't a feature
+  bolted on top of search — it falls straight out of the data structure.
+</Callout>
+
+## From SQL to Elasticsearch — a worked example
+
+Let's make it concrete. In Postgres you'd define the table and search it like
+this:
+
+```sql
+CREATE TABLE products (
+  id          SERIAL PRIMARY KEY,
+  name        TEXT,
+  description TEXT,
+  price       NUMERIC
+);
+
+SELECT * FROM products
+WHERE description LIKE '%wireless keyboard%';
+```
+
+Two problems with that query, both baked into the row-by-row model. It can't use
+a normal B-tree index, so it scans. And the match is literal: a description that
+says "wireless keyboards" (plural) or "wireless mechanical keyboard" (words
+apart) won't match `%wireless keyboard%` at all. You're matching characters, not
+meaning.
+
+Now the Elasticsearch version. You index a document with an HTTP request:
+
+```json
+POST /products/_doc
+{
+  "name": "Wireless Keyboard",
+  "description": "wireless keyboard",
+  "price": 49.99
+}
+```
+
+And you search it with the Query DSL, a JSON body:
+
+```json
+GET /products/_search
+{
+  "query": {
+    "match": {
+      "description": "wireless keyboard"
+    }
+  }
+}
+```
+
+At index time, Elasticsearch **tokenized** `"wireless keyboard"` into the terms
+`[wireless, keyboard]` and added both to the inverted index. So the search
+becomes two fast lookups — one for `wireless`, one for `keyboard` — and the
+results come back **scored**. A product whose description contains *both* words
+ranks above one that only has `wireless`. You didn't ask for that ordering; the
+index gave it to you.
+
+It helps to keep a rough translation table in your head. The mapping is
+**approximate, not exact** — the concepts don't line up one-for-one — but it's
+enough to stop feeling lost:
+
+| Relational database | Elasticsearch |
+|---------------------|---------------|
+| Database | Index (or the whole cluster) |
+| Table | Index |
+| Row | Document (a JSON object) |
+| Column | Field |
+| Schema | Mapping |
+| `WHERE` clause | Query DSL |
+
+Notice that "table" and "database" both land near "index" — that's one of the
+places the analogy strains, and we'll untangle it in later parts. For now, the
+one row that matters most is the last one: a SQL `WHERE` is a filter that a row
+either passes or fails, while a Query DSL `match` is a *ranked* question. Same
+job, different worldview.
+
+## What Elasticsearch is not
+
+Here's where beginners get burned. Once you see how fast and flexible
+Elasticsearch is, the temptation is enormous: *"This is just a better database.
+I'll make it my primary store and drop Postgres."*
+
+Don't. Elasticsearch is a **search and analytics engine**, not a transactional
+database, and the differences are not cosmetic:
+
+- **No ACID transactions.** You can't wrap a group of writes in a transaction and
+  get all-or-nothing guarantees across documents.
+- **No SQL-style joins.** There's no general `JOIN` between indices the way you'd
+  join tables. You model around that, not with it.
+- **It's *near real-time*, not real-time.** A document you just indexed isn't
+  searchable *immediately* — it becomes visible only after the index **refreshes**,
+  which by default happens about once a second. That ~1 second gap is fine for
+  search; it's a disaster for "read your own write" transactional flows.
+
+Historically, Elasticsearch also made deliberate trade-offs — giving up some
+consistency and durability guarantees in exchange for speed and horizontal scale.
+It was built to search and aggregate enormous piles of data quickly, not to be
+the ledger you bet the business on.
+
+<Callout type="gotcha" title="'It's just a faster database, so replace Postgres with it'">
+  This is the number one beginner mistake, and it fails in production in the worst
+  way: quietly. You move your `products` into Elasticsearch as the only store, and
+  for a while it works. Then a checkout needs an atomic multi-row update and
+  there's no transaction to give it. Then a user updates their profile and doesn't
+  see the change on the next page load, because the index hadn't refreshed yet.
+  Then you need to join orders to customers and there's no join. None of these are
+  bugs — they're the engine behaving exactly as designed. Elasticsearch didn't
+  fail to be a good database; it was never trying to be one.
+</Callout>
+
+So what's the right shape? The standard architecture is boringly reliable: **keep
+the source of truth in a real database** — Postgres or MySQL — and **sync a copy
+into Elasticsearch** for search and analytics. Writes go to Postgres, where you
+get transactions, joins, and durability. A pipeline mirrors the relevant data
+into Elasticsearch, where you get fast, ranked, full-text search over it.
+
+Elasticsearch **complements** your database. It rarely replaces it. When you feel
+the urge to make it your only store, that urge is the bug.
+
+## Where this goes next
+
+Everything above is the foundation. Once "distributed document store built around
+an inverted index" is second nature, the rest of Elasticsearch reads as
+consequences of that one idea rather than a pile of features to memorize:
+
+- **Mappings & field types** — how Elasticsearch knows a field is searchable text
+  versus a number, a date, or an exact keyword, and why that decision shapes
+  everything downstream.
+- **[Text analysis](/learninghub/elasticsearch-03-text-analysis/)** — the exact
+  process that turns a string like `"Wireless Keyboards!"` into terms such as
+  `[wireless, keyboards]`, including lowercasing and stripping punctuation — and
+  why matching a plural to its singular takes more than the default analyzer.
+- **[The Query DSL](/learninghub/elasticsearch-04-query-dsl/)** — the JSON
+  language for asking questions, and the crucial split between *filtering* (yes/no,
+  cacheable) and *querying* (scored).
+- **BM25 relevance** — the actual math behind "why did this document rank first,"
+  so ranking stops being magic.
+- **Aggregations** — using the same index to answer analytical questions, not
+  just search ones.
+- **Distributed sharding** — how one index is split across machines so it can
+  hold and search far more than one node could.
+- **[Design decisions](/learninghub/elasticsearch-08-design-decisions/)** — the
+  judgment of *when* to reach for Elasticsearch at all, and when your database
+  already has you covered.
+
+Each of those makes sense only in light of the core idea. Analysis matters
+*because* search is term lookups, so how you build the terms is everything.
+Sharding matters *because* the index can outgrow one machine. The
+database-alongside architecture matters *because* the inverted index is a search
+structure, not a transactional one. Learn the mental model first, and the rest
+stops being intimidating.
+
+> If you can explain why an inverted-index lookup beats a `LIKE` scan, and why
+> the source of truth still belongs in Postgres, you already understand what
+> Elasticsearch is for.

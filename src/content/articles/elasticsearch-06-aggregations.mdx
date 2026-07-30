@@ -1,0 +1,164 @@
+---
+title: "Aggregations: the analytics engine"
+subtitle: "The pivot from 'which documents match?' to 'what can I compute across them?' — and it maps straight onto GROUP BY."
+description: "Elasticsearch aggregations explained: metric vs bucket aggregations, nesting metrics inside buckets, size:0, and why you aggregate on keyword and numeric fields, never analyzed text."
+level: "Intermediate · Core concept"
+accent: "#b45309"
+readingTime: "12 min read"
+updated: 2026-07-30
+order: 15
+---
+
+import Callout from '../../components/Callout.astro';
+
+*Elasticsearch deep-dive · Part 6 of 8. Previous: [Why results come back ranked: BM25](/learninghub/elasticsearch-05-relevance-and-bm25/) · Next: [Running at scale: shards, replicas & the write path](/learninghub/elasticsearch-07-scale-and-the-write-path/).*
+
+Everything so far has answered one question: **which documents match?** You wrote queries, they filtered and ranked, they handed back a list of hits. Aggregations answer a completely different question — **what can I compute across the documents that matched?** Counts, averages, groupings, histograms, distributions.
+
+This is the analytics engine of Elasticsearch. It's the machinery under every Kibana dashboard and the "A" in the reason people run the ELK stack for logs and metrics. And here's the good news if you already know SQL: aggregations map almost one-to-one onto the `GROUP BY` and aggregate functions you write every day. You're not learning a new idea; you're learning a new syntax for an idea you already have.
+
+## Two families
+
+There are two kinds of aggregation, and keeping them straight is most of the battle.
+
+**Metric aggregations** compute a single number over a set of documents. These are the direct analogs of SQL's aggregate functions:
+
+| Aggregation | SQL equivalent |
+|-------------|----------------|
+| `avg`, `sum`, `min`, `max` | `AVG()`, `SUM()`, `MIN()`, `MAX()` |
+| `value_count` | `COUNT(column)` |
+| `cardinality` | `COUNT(DISTINCT column)` |
+| `stats` | count/min/max/avg/sum, all in one call |
+
+`stats` is a small gift: one aggregation returns the count, min, max, average, and sum together, so you don't fire five separate ones to describe a column.
+
+**Bucket aggregations** group documents into buckets — this is `GROUP BY`. Each bucket is a set of documents that share something, and every bucket carries a `doc_count`: how many documents fell into it (your `COUNT(*)` per group).
+
+| Aggregation | Groups by | SQL equivalent |
+|-------------|-----------|----------------|
+| `terms` | one bucket per distinct value | `GROUP BY status` |
+| `date_histogram` | buckets by time interval | `GROUP BY day / week / month` |
+| `range` / `histogram` | buckets by numeric ranges | `GROUP BY` a price band |
+
+So `terms` on a `status` field gives you one bucket for `paid`, one for `pending`, one for `cancelled`, each with its own doc count — exactly what `GROUP BY status` produces.
+
+## The power move: nesting
+
+Metric and bucket aggregations are useful alone, but the real leverage comes from combining them.
+
+<Callout type="insight" title="A metric per group is just a metric inside a bucket">
+  Put a **metric** aggregation *inside* a **bucket** aggregation and you get "a
+  number per group" — which is precisely what `SELECT category, AVG(price) ...
+  GROUP BY category` does. The bucket aggregation carves the documents into
+  groups; the metric runs once per group. Buckets can nest inside buckets too:
+  group by `category`, then by `status` *within* each category, and you've
+  written a two-level `GROUP BY` without a single `JOIN`. Nesting is the whole
+  toolkit — most real aggregation requests are a bucket with one or more metrics
+  spooned inside it.
+</Callout>
+
+## The request shape
+
+Aggregations don't get their own endpoint. They ride on `_search`, alongside the query. That raises an obvious question: if you only want the grouped numbers, why pay to return documents too?
+
+You don't. Set `"size": 0` to say "I don't want any hits back — just the aggregation results." It's faster (Elasticsearch skips fetching and scoring documents to return) and the answer lands in a separate `aggregations` block in the response.
+
+Here's the parallel, side by side. The SQL you'd write:
+
+```sql
+SELECT category, AVG(price) AS avg_price, COUNT(*) AS n
+FROM products
+WHERE in_stock = true
+GROUP BY category;
+```
+
+And the Elasticsearch request:
+
+```json
+GET /products/_search
+{
+  "size": 0,
+  "query": { "term": { "in_stock": true } },
+  "aggs": {
+    "by_category": {
+      "terms": { "field": "category" },
+      "aggs": {
+        "avg_price": { "avg": { "field": "price" } }
+      }
+    }
+  }
+}
+```
+
+Read it against the SQL. The `terms` aggregation named `by_category` is your `GROUP BY category`. The nested `avg_price` metric is your `AVG(price)`. The `query` is your `WHERE`. The response mirrors it:
+
+```json
+{
+  "aggregations": {
+    "by_category": {
+      "buckets": [
+        { "key": "keyboards", "doc_count": 42, "avg_price": { "value": 58.3 } },
+        { "key": "mice",      "doc_count": 31, "avg_price": { "value": 24.9 } }
+      ]
+    }
+  }
+}
+```
+
+Each entry in `by_category.buckets[]` is one group: `key` is the category, `doc_count` is your `COUNT(*)`, and `avg_price.value` is your `AVG(price)`. You didn't need to select the count — the bucket hands it to you for free.
+
+<Callout type="note" title="The filter runs first — like WHERE before GROUP BY">
+  One twist versus SQL, though it works the way you'd hope: the `query` runs
+  **first**, and the aggregations compute **only over the documents it matched**.
+  That's the same ordering as `WHERE` before `GROUP BY` — you group what
+  survived the filter, not the whole index. Narrow with the query, then
+  aggregate over what's left.
+</Callout>
+
+## You can't aggregate on analyzed text
+
+Now the concept from earlier in this series comes back to collect its debt. Text analysis — the tokenizing, lowercasing, stemming that makes full-text search work — is exactly what makes aggregating on a `text` field either fail or lie to you.
+
+<Callout type="gotcha" title="A terms agg on a text field either errors or does the wrong thing">
+  It's tempting to point a `terms` aggregation straight at a `name` field and
+  expect one bucket per product name. Two things stop you:
+
+  **(1) It usually errors.** Aggregations and sorting read from a columnar
+  structure called **doc_values**, built per-document at index time. Analyzed
+  `text` fields don't build doc_values by default — their content lives in the
+  **inverted index** instead. So by default a `terms` agg on a `text` field
+  **fails**, telling you to enable `fielddata`. Don't reach for that switch:
+  `fielddata` loads the field into heap memory and is memory-expensive enough to
+  be a genuine footgun on anything but tiny fields.
+
+  **(2) Even forced, it buckets the wrong thing.** Enable `fielddata` and the
+  aggregation runs — over the **individual analyzed tokens**, not the whole
+  value. Aggregate a `name` field holding `"Wireless Keyboard"` and you get
+  buckets for `wireless`, `keyboard`, `bluetooth`… the tokenized fragments,
+  never `"Wireless Keyboard"` as one group. You asked to group by product; you
+  grouped by word.
+</Callout>
+
+The fix is the rule from [Part 2](/learninghub/elasticsearch-02-documents-and-mappings/): **aggregate and sort on `keyword`, numeric, or date fields — never on analyzed `text`.** Those field types build doc_values and store the value whole, exactly one per document, which is what grouping needs.
+
+This is the whole reason dynamic mapping gives a string *two* fields. When Elasticsearch first sees a string like a product name, it maps it as `name` (a `text` field, [analyzed](/learninghub/elasticsearch-03-text-analysis/) for search) **and** `name.keyword` (a `keyword` field, stored whole for aggregating and sorting). So to group by product name, you write:
+
+```json
+"terms": { "field": "name.keyword" }
+```
+
+The `.keyword` sub-field is the one with doc_values and the intact value. Search hits `name`; analytics hits `name.keyword`. Same string, two jobs, two field types.
+
+## Where this goes next
+
+You've now got the load-bearing shape of every aggregation: metrics compute numbers, buckets group documents, nesting gives you a metric per group, `size: 0` drops the hits, and you aggregate on `keyword`/numeric/date fields — never analyzed `text`. That covers the large majority of real dashboards and reports.
+
+There's more depth here when you need it, all built on the same nesting idea:
+
+- **Sub-aggregations** go deeper — bucket inside bucket inside metric, for multi-level breakdowns.
+- **Pipeline aggregations** compute over the *output* of other aggregations — running totals, moving averages, bucket-to-bucket derivatives.
+- **`cardinality`** gives you approximate distinct counts (like `COUNT(DISTINCT)`) cheaply at scale, trading a little accuracy for a lot of memory saved on high-cardinality fields.
+
+But the more pressing question is how any of this runs when your index is spread across many machines. An aggregation like `terms` has to be computed on each shard and then merged into one answer — and that merge step has consequences for accuracy and cost. That's [Part 7](/learninghub/elasticsearch-07-scale-and-the-write-path/): how Elasticsearch runs across shards and replicas, and what the write path looks like underneath.
+
+> If you can say which field type you'd aggregate on for a product-name breakdown and *why* the `text` version fails — and why you'd set `size: 0` when you only want the numbers — you understand aggregations better than most people copy-pasting dashboard queries.

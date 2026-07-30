@@ -1,0 +1,137 @@
+---
+title: "Why results come back ranked: BM25 relevance"
+subtitle: "Three intuitions — term frequency, rarity, and field length — that explain every _score Elasticsearch returns."
+description: "How Elasticsearch scores relevance with BM25: term frequency with saturation, inverse document frequency, field-length normalization, and why _score is never comparable across queries."
+level: "Intermediate · Core concept"
+accent: "#7c3aed"
+readingTime: "11 min read"
+updated: 2026-07-30
+order: 14
+---
+
+import Callout from '../../components/Callout.astro';
+
+*Elasticsearch deep-dive · Part 5 of 8. Previous: [The Query DSL](/learninghub/elasticsearch-04-query-dsl/) · Next: [Aggregations: the analytics engine](/learninghub/elasticsearch-06-aggregations/).*
+
+Part 1 made a claim and then moved on: Elasticsearch returns results **ranked**, not just matched. A SQL `WHERE name LIKE '%keyboard%'` gives you rows that match — in whatever order the database felt like. Elasticsearch gives you rows *sorted by how well they match*, and it attaches a number, the `_score`, to each one.
+
+This part is *how* that number gets computed. The engine behind it is **BM25** (Best Match 25), the default similarity in modern Elasticsearch. You will never need to write the formula out. What you need are three intuitions — and together they explain almost every "why did *that* product rank first?" question you'll ever ask.
+
+Keep a `products` index in mind the whole way through: each document has a short `name` and a long `description`, and you're building the search box for the store.
+
+## Factor 1 — Term Frequency (TF), with diminishing returns
+
+Start with the obvious signal. If someone searches `keyboard`, a document whose text says "keyboard" five times is probably more *about* keyboards than one that says it once. That's **term frequency**: the more often a query term appears in a document, the higher that document should score.
+
+The naive version of this idea — just count the occurrences — has a nasty failure mode. A page that repeats "keyboard keyboard keyboard keyboard keyboard…" fifty times would bury a genuinely relevant product. Keyword stuffing wins.
+
+BM25 fixes this by making term frequency **saturate**. Going from 1 occurrence to 2 boosts the score a lot. Going from 2 to 3 boosts it less. By the time you're going from 20 to 21, the needle barely moves — the curve flattens out toward a ceiling. Each additional mention is worth less than the one before it.
+
+That single design choice is the headline improvement over naive counting: it captures "this term shows up here" without letting a document win by sheer repetition. Presence matters; obsessive repetition doesn't pay.
+
+## Factor 2 — Inverse Document Frequency (IDF): rare terms matter more
+
+Term frequency looks *inside* one document. The second intuition looks *across the whole index*, and it's the one that most changes how rankings feel.
+
+Ask yourself how much a match actually tells you. If a term appears in almost every document in the index, matching it is nearly worthless — it doesn't distinguish this document from the pile. If a term appears in only a handful of documents, matching it is highly informative: this is one of the few documents that's about that thing.
+
+BM25 encodes exactly this with **inverse document frequency**. Common terms get weighted *down*; rare terms get weighted *up*. IDF is computed per term, across the index.
+
+Make it concrete. Search `wireless mechanical keyboard` against your `products` index. Nearly every product mentions "keyboard," so matching "keyboard" barely separates the field. Far fewer say "mechanical." So a document that matches "mechanical" earns much more from that match than a document that only matches "keyboard" — even though both are query words. Rarity is worth more than ubiquity.
+
+## Factor 3 — Field-length normalization
+
+The third intuition is about *where* the match lands. The same term is not equally significant in a 3-word `name` as it is in a 500-word `description`.
+
+If "keyboard" appears in a three-word product name, it's a big fraction of what that field is about — the field is practically *declaring itself* to be about keyboards. If "keyboard" appears once somewhere in a 500-word description, it's a footnote among hundreds of other words.
+
+BM25 accounts for this by **normalizing for field length**: it effectively divides out how long the field is. A match in a short field scores higher than the same match buried in a long one. Short, focused fields punch above their weight — which is usually what you want, since a product's name is a much stronger relevance signal than a paragraph of marketing copy.
+
+## Put them together
+
+Those three factors don't operate in isolation — BM25 combines them into a single number per matched term, then sums across the query's terms.
+
+<Callout type="insight" title="The whole formula, in one sentence">
+  `_score` ≈ **(how often the term appears, saturating)** × **(how rare the term
+  is across the index)** ÷ **(how long the field is)**. Term frequency pushes the
+  score up but flattens out; IDF multiplies rare terms up and common terms down;
+  field length divides it back down. Internalize that one sentence and you can
+  *predict* rankings before you ever run the query — which is the whole point.
+</Callout>
+
+## Predicting a ranking — worked example
+
+Let's use the model to call a ranking in advance. Two documents in your `products` index:
+
+```json
+{ "name": "Mechanical Keyboard" }
+```
+
+```json
+{ "name": "Wireless Keyboard Bundle with Keyboard Wrist Rest and Keyboard Cover" }
+```
+
+Call them Doc A and Doc B. Now run this query against the `name` field:
+
+```json
+{
+  "query": {
+    "match": { "name": "mechanical keyboard" }
+  }
+}
+```
+
+Doc A ranks higher. Walk through *why*, factor by factor:
+
+- **IDF.** The query has two terms. "keyboard" is common across the index, so it's weighted low. "mechanical" is rarer, so it's weighted high — and **only Doc A matches it at all.** That rare, high-weight term goes entirely to Doc A. Doc B collects nothing from the most valuable word in the query.
+- **Field length.** Doc A's `name` is two words, so its matches normalize *up*. Doc B's `name` is eleven words, so its matches normalize *down* — the field is longer, so each match counts for less.
+- **TF saturation.** Doc B repeats "keyboard" three times, which looks like it should help. But term frequency saturates: the second and third "keyboard" add far less than the first. Repetition can't rescue Doc B, and it certainly can't outweigh the "mechanical" match it's missing.
+
+Every factor points the same direction, so Doc A wins comfortably. You don't have to take that on faith — you can ask Elasticsearch to show its work:
+
+```json
+{
+  "query": {
+    "match": { "name": "mechanical keyboard" }
+  },
+  "explain": true
+}
+```
+
+With `"explain": true` in the search body, each hit comes back with a breakdown of how its `_score` was built — the `tf`, `idf`, and field-length components for every matched term. When a ranking surprises you, this is the first place to look.
+
+## The trap: _score is not an absolute number
+
+Here's where real bugs come from. The `_score` is a number, and numbers *look* comparable, so people treat it like a universal relevance grade. It isn't. Two wrong assumptions cause most of the pain.
+
+<Callout type="gotcha" title="You cannot threshold _score across queries">
+  **Wrong assumption #1: scores are comparable between queries.** BM25 scores are
+  **not** normalized to 0–1 or to any fixed range. A top score of `8.2` in one
+  query and `2.1` in another tells you *nothing* about which result is "better" in
+  absolute terms — the numbers only order results *within a single query's result
+  set*. So a rule like "only show results with `_score` above 5.0" is a trap: it's
+  a different, meaningless cutoff for every query.
+
+  **Wrong assumption #2: a document has a stable score.** IDF is computed relative
+  to the *current* index, so the same document with the same query can score
+  differently as the index's content changes. (Historically, scores could also
+  differ slightly across shards, since each shard computed IDF from its own local
+  statistics.) `_score` is a ranking signal for *one query against the index as it
+  is right now* — not a portable, durable relevance grade.
+</Callout>
+
+So what do you do when you genuinely need an absolute or normalized notion of relevance — say, "hide results that aren't good enough"? You treat it as a separate problem. Options include **rescoring** the top window with a secondary model, **learning-to-rank**, or **client-side min-max normalization** within a result set. Just don't reach for a raw-score threshold and expect it to mean the same thing tomorrow, or on the next query.
+
+## Where this goes next
+
+You now have a mental model that predicts rankings. Everything else in relevance is a way to *bend* that model on purpose:
+
+- **Relevance tuning** — boosting one field over another (a match in `name` should count more than one in `description`), or reshaping scores entirely with `function_score` (recency, popularity, price).
+- **Analyzers** — synonyms and stemming from [Part 3: Text Analysis](/learninghub/elasticsearch-03-text-analysis/) decide *what counts as a match* in the first place, which is upstream of every score BM25 computes.
+
+But the pivot from here is bigger than tuning search. In [Part 6: aggregations](/learninghub/elasticsearch-06-aggregations/), we stop asking "which documents match?" and start asking "what do the matching documents *tell me* in aggregate?" — the move from search engine to analytics engine.
+
+> If you can predict which of two products scores higher for a given query — and
+> explain why in terms of rarity, saturation, and field length — you understand
+> BM25. And if you can explain why you must *never* threshold raw `_score` across
+> two different queries, you understand its one real trap.

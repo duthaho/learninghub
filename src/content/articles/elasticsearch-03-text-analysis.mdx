@@ -1,0 +1,185 @@
+---
+title: "How Elasticsearch reads text: the analysis pipeline"
+subtitle: "The same analyzer runs when you index and when you search — and when it doesn't, matching silently breaks."
+description: "Elasticsearch text analysis explained: character filters, tokenizer and token filters, why the same analyzer runs at index and query time, and the text-vs-keyword behaviour it produces."
+level: "Foundations · Core concept"
+accent: "#0d9488"
+readingTime: "12 min read"
+updated: 2026-07-30
+order: 12
+---
+
+import Callout from '../../components/Callout.astro';
+
+*Elasticsearch deep-dive · Part 3 of 8. Previous: [Documents, mappings & the shape of your data](/learninghub/elasticsearch-02-documents-and-mappings/) · Next: [The Query DSL](/learninghub/elasticsearch-04-query-dsl/).*
+
+Part 1 gave you the load-bearing idea: an inverted index maps **terms** to the document IDs that contain them. Search a term, get back the docs — fast, because the lookup is a dictionary hit, not a scan.
+
+But that skipped a question. Your product catalog is full of messy strings — `"Wireless Keyboards, Running FAST!"` — with mixed case, commas, exclamation marks, plurals. The inverted index doesn't store *that*. It stores clean terms. So what turns the string a user typed into the terms that actually go in the index?
+
+That process is **analysis**, and the thing that performs it is an **analyzer**. Understanding the analyzer is the single biggest step toward reasoning about Elasticsearch search behaviour — including the `text` vs `keyword` rule you met in Part 2, which turns out to be nothing more than *two different analyzers running on the same string.*
+
+## The analyzer pipeline
+
+An analyzer is a pipeline with three stages, always in this order:
+
+```
+raw text → [character filters] → [tokenizer] → [token filters] → terms
+```
+
+Each stage has a clear job.
+
+**Character filters (0 or more)** operate on the *raw string*, before anything is split up. They add, remove, or rewrite characters. The classic example is the `html_strip` filter turning `<b>hi</b>` into `hi`. Most fields use none at all — this stage is often empty.
+
+**Tokenizer (exactly one)** splits the string into individual tokens. This is the heart of the pipeline, and every analyzer has exactly one. The `standard` tokenizer breaks on whitespace and punctuation:
+
+```
+"Wireless Keyboards, Running FAST!" → [Wireless, Keyboards, Running, FAST]
+```
+
+The comma and exclamation mark are gone; they were separators, not content.
+
+**Token filters (0 or more)** transform the token stream that comes out of the tokenizer. They run in sequence, each one seeing the output of the last. Common filters:
+
+- **lowercase** — `[Wireless, Keyboards, Running, FAST]` → `[wireless, keyboards, running, fast]`
+- **stemming** — reduces words to their root: `keyboards` → `keyboard`, `running` → `run`
+- **stop-words** — drops high-frequency noise words like `the`, `a`, `is`
+
+So the terms that land in your inverted index are the *output of the whole pipeline*, not the words you typed.
+
+<Callout type="note" title="The default standard analyzer does NOT stem">
+  This is the part almost everyone gets wrong at first. The default analyzer —
+  called `standard` — lowercases and splits on punctuation and whitespace, but it
+  does **not** stem. Run `"Wireless Keyboards, Running FAST!"` through it and you
+  get `[wireless, keyboards, running, fast]` — plurals kept, `running` still
+  `running`. Stemming is a separate token filter that the `standard` analyzer
+  simply doesn't include. To get it, you choose a different analyzer, such as
+  `english`. Keep this distinction sharp; two of the gotchas below fall straight
+  out of it.
+</Callout>
+
+## Analysis runs at BOTH index time and query time
+
+Here is the idea that everything else in this article depends on. Analysis doesn't happen only when you store data. It happens *twice* — once on the way in, once on the way out — and it has to.
+
+**At index time**, when you store a document, Elasticsearch runs each `text` field's value through that field's analyzer. The resulting terms are what get written into the inverted index. The original string is kept separately (in `_source`), but it is *not* what you search against.
+
+**At query time**, a full-text query like `match` takes the string *you searched for* and runs it through the *same* analyzer, before doing any lookup. Only then does it go to the inverted index to find matching terms.
+
+<Callout type="insight" title="Both sides normalize, and meet in the middle">
+  Suppose you index `"Keyboard"`. The `standard` analyzer lowercases it, so the
+  inverted index holds the term `keyboard`. Now a user searches `"Keyboard"` with
+  a capital K. If the query text went to the index *raw*, it would look for
+  `Keyboard`, find no such term, and return nothing — even though the document is
+  right there. It works because the `match` query runs your search string through
+  the **same** analyzer, turning `Keyboard` into `keyboard`, which *does* exist.
+  Index-time analysis and query-time analysis normalize both sides to the same
+  form so they can meet in the middle. That symmetry is the whole trick.
+</Callout>
+
+The corollary is where the pain lives: if the index-time analyzer and the query-time analyzer **disagree**, the two sides normalize to different forms and never meet. You get **zero hits and no error** — the query is valid, the field exists, the document exists, and yet nothing matches. It is one of the most confusing situations in Elasticsearch precisely because nothing looks broken. Keeping "same analyzer, both times" in your head is what saves you here.
+
+## Watch it happen: the _analyze API
+
+You don't have to guess what an analyzer produces — Elasticsearch will show you. The `_analyze` API runs any analyzer against any text and hands back the exact terms.
+
+```bash
+POST /_analyze
+{
+  "analyzer": "standard",
+  "text": "Wireless Keyboards, Running FAST!"
+}
+```
+
+The response contains four tokens: `wireless`, `keyboards`, `running`, `fast`. Lowercased, punctuation stripped, and — note again — **not** stemmed. `keyboards` stays plural; `running` stays `running`. This is precisely what a `text` field does to its contents at index time.
+
+Now try the `keyword` analyzer on the *same* string:
+
+```bash
+POST /_analyze
+{
+  "analyzer": "keyword",
+  "text": "Wireless Keyboards, Running FAST!"
+}
+```
+
+You get back a single token: `Wireless Keyboards, Running FAST!` — the entire string, verbatim, untouched. The `keyword` analyzer effectively does no tokenization at all; it treats the whole input as one indivisible term, preserving case and punctuation.
+
+That contrast *is* the answer to the `text` vs `keyword` question from Part 2:
+
+- A **`text`** field runs the `standard` analyzer → many small, normalized terms. Great for `match` (full-text search across words), useless for exact equality (there's no single term equal to the original string).
+- A **`keyword`** field runs the `keyword` analyzer → exactly one term, the string verbatim. Perfect for `term` queries, filters, aggregations, and sorting, where you need the value as a whole, exact unit.
+
+So the rule you learned as "use `text` for search, `keyword` for exact match" was never really about two field types. It's about **two analyzers applied to the same string** — one that shatters it into normalized pieces, one that keeps it whole.
+
+## Gotcha 1: term does NO analysis
+
+Now the pipeline pays off by explaining a bug that traps nearly everyone.
+
+Index `"Wireless Keyboard"` into a `text` field. The `standard` analyzer runs, and the inverted index holds the terms `[wireless, keyboard]` — lowercased and split. So far so good. Now search for it exactly:
+
+```json
+{ "term": { "name": "Wireless Keyboard" } }
+```
+
+Zero hits. No error.
+
+<Callout type="gotcha" title="term bypasses analysis entirely">
+  The critical thing to understand: a `term` query does **not** analyze its input.
+  It doesn't lowercase, doesn't split — it takes your literal string
+  `"Wireless Keyboard"` (capital W, capital K, the space in the middle) and looks
+  for that *exact term* in the inverted index. But the index never held
+  `"Wireless Keyboard"`. Analysis shattered it into `wireless` and `keyboard` at
+  index time. There is no single term equal to the whole phrase, so the lookup
+  fails silently. The precise framing matters: this isn't "the query used a
+  different analyzer." It's **no analysis at all**, run against a field that was
+  stored **with** analysis — a mismatch by omission. Rule of thumb: use `match`
+  (analyzed) on `text` fields, and `term` (not analyzed) on `keyword` fields.
+  We formalize `match` vs `term` in
+  [Part 4](/learninghub/elasticsearch-04-query-dsl/).
+</Callout>
+
+## Gotcha 2: the standard analyzer doesn't stem
+
+The second trap comes straight from the "no stemming by default" fact.
+
+You have a `text` field storing the word `"box"`. Under the default `standard` analyzer, the indexed term is `box`. A user searches for the plural:
+
+```json
+{ "match": { "name": "boxes" } }
+```
+
+You might expect a hit — surely Elasticsearch knows `boxes` is just `box`? It doesn't, not by default.
+
+<Callout type="gotcha" title="Plurals don't match without a stemming analyzer">
+  The `match` query analyzes `"boxes"` with the field's analyzer. Under the
+  default `standard` analyzer, `boxes` stays `boxes` — no stemming — so the query
+  looks for the term `boxes`. The stored term is `box`. Different terms, no match.
+  To make singular and plural interchange, you need a **stemming analyzer** such as
+  `english`, which reduces *both* `box` (at index time) and `boxes` (at query
+  time) to the same root `box` — and now they meet. The lesson: don't assume the
+  default stems. If `"keyboards"` failing to find `"keyboard"` surprises you, this
+  is why.
+</Callout>
+
+## A three-tier way to think about matching
+
+Pulling the threads together, whether a search matches comes down to three moving parts lining up:
+
+1. **The stored terms** are produced by the *field's* analyzer at index time.
+2. **A `match` query** re-analyzes your query string with that *same* analyzer, so both sides land in the same normalized form.
+3. **A `term` query** bypasses analysis entirely and looks up your string as a literal.
+
+Getting a hit is a matter of choosing the query type that lines up with how the field was stored. `match` on a `text` field: both sides analyzed the same way — they meet. `term` on a `keyword` field: the field stored the value verbatim, and `term` looks it up verbatim — they meet. Cross the wires — `term` on a `text` field, or a search that assumes stemming that isn't there — and you get the silent zero-hit result.
+
+## Where this goes next
+
+Everything downstream builds on this pipeline:
+
+- **[The Query DSL (Part 4)](/learninghub/elasticsearch-04-query-dsl/)** formalizes the `match` vs `term` distinction you just met, along with the rest of the query and filter vocabulary. With the analyzer model in hand, those queries stop being magic and become predictable.
+- **[Aggregations (Part 6)](/learninghub/elasticsearch-06-aggregations/)** lean on `keyword` fields for exactly the reason this article explains: aggregating and sorting need one exact term per value, which is what the `keyword` analyzer gives you and the `standard` analyzer destroys.
+
+> If you can predict when a `term` query will return nothing — and explain why a
+> search for `"keyboards"` may fail to find a document containing `"keyboard"` —
+> you understand Elasticsearch text matching better than most people who query it
+> every day.

@@ -1,0 +1,174 @@
+---
+title: "The Query DSL: match, term, bool & the two contexts"
+subtitle: "Which leaf query to use, and whether it should score relevance or just include-and-exclude."
+description: "Elasticsearch Query DSL fundamentals: match vs term, combining clauses with bool (must/should/filter/must_not), and the crucial difference between query context and filter context."
+level: "Foundations · Core concept"
+accent: "#2563eb"
+readingTime: "12 min read"
+updated: 2026-07-30
+order: 13
+---
+
+import Callout from '../../components/Callout.astro';
+
+*Elasticsearch deep-dive · Part 4 of 8. Previous: [How Elasticsearch reads text](/learninghub/elasticsearch-03-text-analysis/) · Next: [Why results come back ranked: BM25](/learninghub/elasticsearch-05-relevance-and-bm25/).*
+
+In SQL you ask questions with a `WHERE` clause: a flat string of `AND`s, `OR`s, and comparisons. In Elasticsearch you ask questions with **JSON trees** — a structure called the **Query DSL**, where every node is a query and queries nest inside other queries. If you're building a search box for a `products` catalogue, this is the language you'll live in.
+
+Two things make the DSL click, and this part is about both: **which leaf query to use** for a given field, and **which context** that query runs in. The first decides whether your terms even match; the second decides whether the match contributes to ranking. Both build directly on [text analysis](/learninghub/elasticsearch-03-text-analysis/) — because whether a query analyzes its input is the difference between finding your documents and finding nothing at all.
+
+## The three workhorse queries
+
+Ninety percent of the queries you write are built from three pieces: `match`, `term`, and `bool`. Learn these and the rest is variation.
+
+### match — the full-text query
+
+`match` is what you reach for when you're searching human-typed words against a `text` field. Its defining behaviour: it **analyzes your search string first**, using the same analyzer as the field, then looks for the resulting terms.
+
+```json
+{ "query": { "match": { "name": "wireless keyboard" } } }
+```
+
+The string `"wireless keyboard"` gets analyzed to the terms `[wireless, keyboard]`, and Elasticsearch finds documents whose `name` field contains those terms. Because it's full-text, results come back **scored** — ranked by how well each document matches. A product named "Wireless Keyboard, Compact" scores higher than one that only mentions "wireless" in passing.
+
+### term — the exact query
+
+`term` is the opposite reflex. It does **not** analyze your input — it looks up the literal value you gave it, byte for byte.
+
+```json
+{ "query": { "term": { "status": "shipped" } } }
+```
+
+This finds documents where `status` is exactly `shipped`. Use `term` on the fields that hold exact values: `keyword` fields, numbers, booleans, and dates. It's the query for structured, categorical data — the equivalent of `WHERE status = 'shipped'`.
+
+<Callout type="gotcha" title="term against a text field is a classic miss">
+  Run `term` on an analyzed `text` field and you'll often get zero hits. The
+  field was analyzed at index time (`"Wireless Keyboard"` became the terms
+  `[wireless, keyboard]`), but `term` does **not** analyze your input — so a
+  search for the literal `"Wireless Keyboard"` looks for that whole
+  capitalized string as a single term, which was never stored. Rule: `term`
+  for `keyword`/numbers/booleans/dates, `match` for `text`.
+</Callout>
+
+### bool — the combiner
+
+Real questions have more than one condition. `bool` is the query that assembles other queries into `AND` / `OR` / `NOT` logic. It has exactly four clause types, and each one means something specific:
+
+| Clause | Logic | Must match? | Scores? | SQL analogue |
+|--------|-------|-------------|---------|--------------|
+| `must` | AND | yes, all of them | yes — contributes to relevance | `AND` |
+| `should` | OR | boosts if matched | yes — contributes to relevance | `OR` / "nice to have" |
+| `filter` | AND | yes | **no** — and cacheable | `AND` (hard constraint) |
+| `must_not` | NOT | must **not** match | no | `NOT` |
+
+Here's a `bool` that combines all four ideas — the words the user typed, some hard constraints, and an exclusion:
+
+```json
+{
+  "query": {
+    "bool": {
+      "must": [
+        { "match": { "name": "wireless keyboard" } }
+      ],
+      "filter": [
+        { "term":  { "in_stock": true } },
+        { "range": { "price": { "lte": 100 } } }
+      ],
+      "must_not": [
+        { "term": { "brand": "Generic" } }
+      ]
+    }
+  }
+}
+```
+
+Read it top to bottom: the `name` must match "wireless keyboard" (and that match drives ranking); the product must be in stock and cost no more than 100; and it must not be brand "Generic". One tree, four kinds of logic.
+
+## Query context vs filter context
+
+Notice that the table above splits the four clauses along a line that has nothing to do with AND/OR/NOT: some clauses **score** and some don't. That split is the single most important idea in this article.
+
+Every query in Elasticsearch runs in one of two **contexts**, and the context — not the query type — decides whether a relevance score is computed.
+
+<Callout type="insight" title="The question each context asks">
+  **Query context** asks *"how well does this document match?"* — it computes a
+  numeric relevance `_score`. **Filter context** asks *"does this document
+  match, yes or no?"* — it computes no score at all, just a boolean
+  include/exclude. Same `term` query can run in either context; the context is
+  what changes. Put your relevance signals in query context and your hard
+  constraints in filter context, and the DSL starts writing itself.
+</Callout>
+
+**Query context** is used by `must` and `should`. It computes the `_score` — the ranked-results behaviour that makes Elasticsearch a search engine rather than a filter. When you put the user's typed words in `must`, you're saying "rank documents by how well they match this."
+
+**Filter context** is used by `filter` and `must_not`. It computes no score — just membership. This buys you two things:
+
+- **It's faster.** No relevance math runs, so a filter is cheaper than the equivalent scored query.
+- **It's cacheable.** Elasticsearch caches the set of documents matching a filter. Ask "which documents have `in_stock: true`?" once, and the answer is remembered — every later query that reuses that filter is near-instant, because the set is already computed.
+
+The rule of thumb falls straight out of this. Hard constraints you don't want influencing the ranking — `status = shipped`, `price <= 100`, `in_stock = true` — belong in **filter** context. The words the user actually typed, the ones that should decide what ranks first — belong in **must** (or **should**). Ranking signals get scored; gatekeeping conditions don't.
+
+## From SQL to bool
+
+Put it all together with a concrete translation. Here's the question in SQL — find in-stock wireless keyboards under 100, excluding a house brand, ordered by how well they match:
+
+```sql
+SELECT *
+FROM products
+WHERE description LIKE '%wireless keyboard%'
+  AND in_stock = true
+  AND price <= 100
+  AND brand <> 'Generic'
+ORDER BY <relevance>;
+```
+
+That last line is the tell: a relational engine has no native notion of "order by relevance." `LIKE` either matches or it doesn't — there's no built-in score for *how well* a row matched. You'd have to bolt on your own ranking. In Elasticsearch, relevance ranking is the default, and the idiomatic translation makes the split explicit:
+
+```json
+{
+  "query": {
+    "bool": {
+      "must": [
+        { "match": { "description": "wireless keyboard" } }
+      ],
+      "filter": [
+        { "term":  { "in_stock": true } },
+        { "range": { "price": { "lte": 100 } } }
+      ],
+      "must_not": [
+        { "term": { "brand": "Generic" } }
+      ]
+    }
+  }
+}
+```
+
+The `must` clause **drives ranking**: results come back ordered by how well `description` matched "wireless keyboard". The `filter` clauses **narrow the set** — in stock, under 100 — without disturbing that ranking, and they're cached for the next query. The `must_not` excludes the house brand, also without scoring. Each condition sits in the context that matches its job.
+
+## The "just put everything in must" trap
+
+Once you know `must` means AND, it's tempting to pour every condition into it: match the description, `must` the `in_stock: true`, `must` the price range, done. It returns the right documents — so what's wrong with it?
+
+<Callout type="gotcha" title="Everything in must is a performance and correctness smell">
+  Putting a hard constraint like `in_stock: true` in `must` goes wrong three
+  ways. **(1) Wasted work:** `must` runs in query context, so Elasticsearch
+  computes a relevance score for a plain true/false condition — scoring math
+  that means nothing. **(2) No caching:** query context doesn't use the filter
+  cache, so a condition you apply on *every* search gets recomputed every
+  single time, instead of being answered from a cached set. **(3) Skewed
+  ranking:** the constraint's score contributes to `_score`, so a pure
+  gatekeeping condition subtly reorders your results for no good reason. The
+  fluent move is the split from earlier — **query context for what to rank by,
+  filter context for what must be true.**
+</Callout>
+
+The fix is always the same edit: take the conditions that are hard constraints and move them from `must` to `filter`. Same documents come back, but faster, cacheable, and with ranking that reflects only the signals you actually meant to rank by.
+
+## Where this goes next
+
+You now know *which* clause a condition belongs in and *why*. What you haven't seen is how the `must` and `should` scores are actually computed — where the number in `_score` comes from when a `match` query ranks one document above another. That's the algorithm behind relevance, called **BM25**, and it's the subject of [Part 5](/learninghub/elasticsearch-05-relevance-and-bm25/). Once you understand how scoring works, the choice between query and filter context stops being a rule of thumb and becomes an obvious consequence.
+
+> If you can look at any condition in a query and say instantly which `bool`
+> clause it belongs in — and whether it should shape the ranking or merely gate
+> the results — you understand the Query DSL better than most people shipping
+> search to production.
