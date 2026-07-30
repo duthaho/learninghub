@@ -6,11 +6,43 @@ const articles = (await getCollection('articles', ({ data }) => !data.draft))
   .sort((a, b) => a.data.order - b.data.order);
 const base = import.meta.env.BASE_URL;
 
+// Collapse multi-part series (frontmatter `series`) into a single folder entry;
+// standalone articles stay as their own file row. `part: 0` is the series cover
+// (the start-here guide), everything else is a numbered chapter.
+const bySeries = new Map();
+const standalone = [];
+for (const a of articles) {
+  if (a.data.series) {
+    if (!bySeries.has(a.data.series)) bySeries.set(a.data.series, []);
+    bySeries.get(a.data.series).push(a);
+  } else {
+    standalone.push(a);
+  }
+}
+
+const entries = standalone.map((a) => ({ kind: 'article', order: a.data.order, article: a }));
+for (const [name, parts] of bySeries) {
+  parts.sort((x, y) => (x.data.part ?? 0) - (y.data.part ?? 0));
+  const cover = parts.find((p) => (p.data.part ?? 0) === 0) ?? parts[0];
+  const chapters = parts.filter((p) => p !== cover);
+  entries.push({
+    kind: 'series',
+    order: Math.min(...parts.map((p) => p.data.order)),
+    name,
+    slug: name.toLowerCase(),
+    cover,
+    chapters,
+    count: chapters.length,
+  });
+}
+entries.sort((a, b) => a.order - b.order);
+
 const upcoming = [
   { id: 'mysql', title: 'MySQL', subtitle: 'Indexes, transactions & the query planner' },
 ];
 
 const fileIcon = 'M13 2v6h6';
+const folderPath = 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z';
 ---
 
 <BaseLayout
@@ -43,29 +75,75 @@ const fileIcon = 'M13 2v6h6';
           <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
           Topics
         </span>
-        <span class="p-meta">{articles.length} live · {upcoming.length} in progress</span>
+        <span class="p-meta">{entries.length} topics · {articles.length} articles · {upcoming.length} in progress</span>
       </div>
 
       <ul class="list" role="list">
-        {articles.map((a) => (
-          <li class="row">
-            <a href={`${base}${a.id}/`}>
-              <span class="ficon" aria-hidden="true">
-                <svg viewBox="0 0 24 24" width="18" height="18"><path d="M6 2h8l4 4v16H6z"/><path d={fileIcon}/></svg>
-              </span>
-              <span class="row-main">
-                <span class="row-top">
-                  <span class="fname">{a.id}.md</span>
+        {entries.map((e) => (
+          e.kind === 'article' ? (
+            <li class="row">
+              <a href={`${base}${e.article.id}/`}>
+                <span class="ficon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" width="18" height="18"><path d="M6 2h8l4 4v16H6z"/><path d={fileIcon}/></svg>
                 </span>
-                <span class="row-title">{a.data.title}</span>
-                <span class="row-sub">{a.data.subtitle}</span>
-              </span>
-              <span class="row-end">
-                <span class="rt">{a.data.readingTime}</span>
-                <span class="go" aria-hidden="true">→</span>
-              </span>
-            </a>
-          </li>
+                <span class="row-main">
+                  <span class="row-top">
+                    <span class="fname">{e.article.id}.md</span>
+                  </span>
+                  <span class="row-title">{e.article.data.title}</span>
+                  <span class="row-sub">{e.article.data.subtitle}</span>
+                </span>
+                <span class="row-end">
+                  <span class="rt">{e.article.data.readingTime}</span>
+                  <span class="go" aria-hidden="true">→</span>
+                </span>
+              </a>
+            </li>
+          ) : (
+            <li class="row row-folder">
+              <details class="folder">
+                <summary class="folder-head">
+                  <span class="ficon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="18" height="18"><path d={folderPath}/></svg>
+                  </span>
+                  <span class="row-main">
+                    <span class="row-top">
+                      <span class="fname">{e.slug}/</span>
+                      <span class="tag tag-series">{e.count}-part series</span>
+                    </span>
+                    <span class="row-title">{e.name}</span>
+                    <span class="row-sub">{e.cover.data.subtitle}</span>
+                  </span>
+                  <span class="row-end">
+                    <span class="rt folder-hint">Browse parts</span>
+                    <span class="chev" aria-hidden="true">
+                      <svg viewBox="0 0 24 24" width="16" height="16"><path d="M9 6l6 6-6 6"/></svg>
+                    </span>
+                  </span>
+                </summary>
+                <ul class="chapters" role="list">
+                  <li class="chapter chapter-cover">
+                    <a href={`${base}${e.cover.id}/`}>
+                      <span class="cnum" aria-hidden="true">★</span>
+                      <span class="chapter-title">Start here — series guide</span>
+                      <span class="rt">{e.cover.data.readingTime}</span>
+                      <span class="go" aria-hidden="true">→</span>
+                    </a>
+                  </li>
+                  {e.chapters.map((c) => (
+                    <li class="chapter">
+                      <a href={`${base}${c.id}/`}>
+                        <span class="cnum">{c.data.part}</span>
+                        <span class="chapter-title">{c.data.title}</span>
+                        <span class="rt">{c.data.readingTime}</span>
+                        <span class="go" aria-hidden="true">→</span>
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            </li>
+          )
         ))}
         {upcoming.map((u) => (
           <li class="row row-soon">
@@ -146,9 +224,78 @@ const fileIcon = 'M13 2v6h6';
     .tag-soon { color: var(--ink-faint); background: var(--paper-sunk); border-color: var(--line); }
     .row-soon { opacity: 0.72; }
 
+    /* Series folder — one collapsible row that reveals its parts */
+    .row-folder { padding: 0; }
+    .folder { width: 100%; }
+    .folder-head {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      padding: 1rem 1.25rem;
+      cursor: pointer;
+      list-style: none;
+      transition: background 0.15s ease;
+    }
+    .folder-head::-webkit-details-marker { display: none; }
+    .folder-head:hover { background: var(--paper-sunk); }
+    .folder-head:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+    .tag-series {
+      font-family: var(--mono);
+      font-size: 0.66rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--accent);
+      background: var(--accent-wash, var(--paper-sunk));
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 0.12rem 0.55rem;
+    }
+    .chev { color: var(--accent); display: grid; place-items: center; transition: transform 0.2s ease; }
+    .chev svg { fill: none; stroke: currentColor; stroke-width: 2; }
+    .folder[open] > .folder-head .chev { transform: rotate(90deg); }
+
+    .chapters {
+      list-style: none;
+      margin: 0;
+      padding: 0.25rem 0 0.5rem;
+      background: var(--paper-sunk);
+      border-top: 1px solid var(--line);
+    }
+    .chapter > a {
+      display: flex;
+      align-items: center;
+      gap: 0.9rem;
+      padding: 0.55rem 1.25rem 0.55rem 3.4rem;
+      text-decoration: none;
+      color: inherit;
+      transition: background 0.15s ease;
+    }
+    .chapter > a:hover { background: var(--paper-raised); }
+    .cnum {
+      flex: 0 0 auto;
+      width: 1.55rem;
+      height: 1.55rem;
+      display: grid;
+      place-items: center;
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      color: var(--accent);
+      background: var(--paper-raised);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+    }
+    .chapter-cover .cnum { border-style: dashed; }
+    .chapter-title { flex: 1 1 auto; min-width: 0; font-size: 0.96rem; font-weight: 550; color: var(--ink); }
+    .chapter-cover .chapter-title { color: var(--ink-soft); font-style: italic; }
+    .chapter .go { color: var(--accent); font-size: 1rem; transition: transform 0.15s ease; }
+    .chapter > a:hover .go { transform: translateX(3px); }
+
     @media (max-width: 34rem) {
       .row-end .rt { display: none; }
       .row > a, .row.row-soon { padding: 0.9rem 1rem; }
+      .folder-head { padding: 0.9rem 1rem; }
+      .chapter > a { padding-left: 2.6rem; }
+      .chapter .rt { display: none; }
     }
   </style>
 </BaseLayout>

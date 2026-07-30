@@ -19,6 +19,11 @@ const articles = defineCollection({
     draft: z.boolean().default(false),
     // Ordering on the homepage (lower = earlier).
     order: z.number().default(100),
+    // Multi-part series grouping. Articles sharing a `series` name collapse into
+    // one folder on the homepage; `part` orders them (part 0 = the start-here
+    // cover/guide, not a numbered chapter). Standalone articles omit both.
+    series: z.string().optional(),
+    part: z.number().optional(),
   }),
 });
 
