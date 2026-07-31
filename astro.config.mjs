@@ -4,11 +4,17 @@ import sitemap from '@astrojs/sitemap';
 import rehypeSlug from 'rehype-slug';
 import rehypeAutolinkHeadings from 'rehype-autolink-headings';
 
-// GitHub Pages project site: https://duthaho.github.io/learninghub/
-// If you later add a custom domain, set `site` to it and drop `base`.
+// Deploy targets are selected by env vars so one repo serves both hosts:
+//   • Cloudflare Pages @ learninghub.duthaho.dev — root path (defaults below)
+//   • GitHub Pages @ duthaho.github.io/learninghub — set SITE + BASE_PATH in CI
+// Cloudflare builds with no extra env, so it just gets the root-domain defaults.
+const SITE = process.env.SITE ?? 'https://learninghub.duthaho.dev';
+const BASE = process.env.BASE_PATH ?? '/';
+
 export default defineConfig({
-  site: 'https://duthaho.github.io',
-  base: '/learninghub/',
+  site: SITE,
+  base: BASE,
+  trailingSlash: 'ignore',
   integrations: [mdx(), sitemap()],
   markdown: {
     // Dual Shiki themes → tokens carry both light + dark colours as CSS vars,

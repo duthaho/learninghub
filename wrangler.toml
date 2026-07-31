@@ -1,0 +1,6 @@
+# Cloudflare Pages project config.
+# Lets both the dashboard (Git integration) and `wrangler pages deploy`
+# know the project name and where the static build lands.
+name = "duthaho-learninghub"
+compatibility_date = "2024-11-01"
+pages_build_output_dir = "dist"

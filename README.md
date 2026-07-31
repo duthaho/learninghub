@@ -62,9 +62,25 @@ src/
 
 ## Deploying
 
-Any static host works. The build output is `dist/`.
+Static build (`dist/`), served from two hosts. The base path and canonical URL
+are chosen by env vars (see `astro.config.mjs`):
 
-- **GitHub Pages / Netlify / Vercel / Cloudflare Pages:** point at this folder,
-  build command `npm run build`, publish directory `dist`.
-- Update `site` in `astro.config.mjs` to your real domain first (used for
-  canonical URLs and the sitemap).
+| Host | URL | `SITE` | `BASE_PATH` |
+|------|-----|--------|-------------|
+| **Cloudflare Pages** (primary) | `https://learninghub.duthaho.dev` | *(default)* | `/` *(default)* |
+| **GitHub Pages** (mirror) | `https://duthaho.github.io/learninghub` | set in CI | `/learninghub/` |
+
+Cloudflare builds with no extra env, so it gets the root-domain defaults. The
+GitHub Actions workflow sets `SITE` + `BASE_PATH` for the subpath.
+
+### Cloudflare Pages (project `duthaho-learninghub`)
+
+1. **Create the project** — Cloudflare dashboard → *Workers & Pages* → *Create* →
+   *Pages* → *Connect to Git* → pick `duthaho/learninghub`.
+2. **Build settings:** framework preset **Astro**, build command `npm run build`,
+   output directory `dist` (also in `wrangler.toml`). Node 22 is pinned via `.nvmrc`.
+3. **Custom domain:** project → *Custom domains* → *Set up a domain* →
+   `learninghub.duthaho.dev`. If `duthaho.dev` is on Cloudflare DNS, the CNAME is
+   added automatically; otherwise add `CNAME learninghub → duthaho-learninghub.pages.dev`.
+
+CLI alternative: `npx wrangler pages deploy dist --project-name duthaho-learninghub`.

@@ -19,6 +19,11 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # GitHub Pages serves this project from the /learninghub subpath, so build
+    # with the subpath base. (Cloudflare Pages uses the root-domain defaults.)
+    env:
+      SITE: https://duthaho.github.io
+      BASE_PATH: /learninghub/
     steps:
       - name: Checkout
         uses: actions/checkout@v4
