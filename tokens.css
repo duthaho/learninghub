@@ -1,0 +1,71 @@
+/* ------------------------------------------------------------------ *
+ *  learninghub — design tokens (portable)
+ *  Editorial almanac · oxblood on warm ivory · Fraunces + Source Serif 4.
+ *  Mirrors src/styles/global.css. Import wherever the system is reused.
+ * ------------------------------------------------------------------ */
+
+:root {
+  /* ---- Colour · light ---- */
+  --color-paper:     oklch(97.2% 0.008 78);
+  --color-paper-2:   oklch(94.6% 0.010 78);
+  --color-paper-3:   oklch(92.0% 0.012 76);
+  --color-ink:       oklch(23% 0.014 48);
+  --color-ink-2:     oklch(43% 0.016 50);
+  --color-ink-faint: oklch(51% 0.014 55);
+  --color-rule:      oklch(86% 0.012 72);
+  --color-rule-2:    oklch(79% 0.014 70);
+  --color-accent:    oklch(45% 0.132 25);
+  --color-accent-2:  oklch(38% 0.120 24);
+  --color-accent-wash: color-mix(in oklch, var(--color-accent) 8%, var(--color-paper-2));
+  --color-focus:     oklch(52% 0.160 25);
+
+  /* ---- Type ---- */
+  --font-display: 'Fraunces Variable', 'Fraunces', ui-serif, Georgia, 'Times New Roman', serif;
+  --font-body:    'Source Serif 4 Variable', 'Source Serif 4', ui-serif, Georgia, serif;
+  --font-mono:    'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+
+  --text-xs:   0.75rem;
+  --text-sm:   0.85rem;
+  --text-base: 1rem;
+  --text-md:   1.15rem;
+  --text-lg:   1.4rem;
+  --text-xl:   1.85rem;
+  --text-2xl:  2.35rem;
+  --text-display: clamp(2.6rem, 5.2vw + 1rem, 4.6rem);
+
+  /* ---- Spacing · 4pt ---- */
+  --space-3xs: 0.125rem;
+  --space-2xs: 0.25rem;
+  --space-xs:  0.5rem;
+  --space-sm:  0.75rem;
+  --space-md:  1rem;
+  --space-lg:  1.5rem;
+  --space-xl:  2.5rem;
+  --space-2xl: 4rem;
+  --space-3xl: 6rem;
+
+  /* ---- Radius (near-zero: ruled, not boxed) ---- */
+  --radius:    3px;
+  --radius-sm: 2px;
+
+  /* ---- Motion ---- */
+  --ease-out:    cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --dur-short:   150ms;
+  --dur-med:     240ms;
+}
+
+:root[data-theme='dark'] {
+  --color-paper:     oklch(19% 0.010 48);
+  --color-paper-2:   oklch(23% 0.012 48);
+  --color-paper-3:   oklch(27% 0.013 48);
+  --color-ink:       oklch(92% 0.012 82);
+  --color-ink-2:     oklch(74% 0.012 70);
+  --color-ink-faint: oklch(58% 0.012 60);
+  --color-rule:      oklch(33% 0.013 50);
+  --color-rule-2:    oklch(42% 0.014 50);
+  --color-accent:    oklch(68% 0.140 30);
+  --color-accent-2:  oklch(76% 0.130 33);
+  --color-accent-wash: color-mix(in oklch, var(--color-accent) 16%, var(--color-paper-2));
+  --color-focus:     oklch(70% 0.150 30);
+}

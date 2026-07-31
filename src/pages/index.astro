@@ -6,8 +6,8 @@ const articles = (await getCollection('articles', ({ data }) => !data.draft))
   .sort((a, b) => a.data.order - b.data.order);
 const base = import.meta.env.BASE_URL;
 
-// Collapse multi-part series (frontmatter `series`) into a single folder entry;
-// standalone articles stay as their own file row. `part: 0` is the series cover
+// Collapse multi-part series (frontmatter `series`) into a single entry;
+// standalone articles stay as their own row. `part: 0` is the series cover
 // (the start-here guide), everything else is a numbered chapter.
 const bySeries = new Map();
 const standalone = [];
@@ -41,8 +41,7 @@ const upcoming = [
   { id: 'mysql', title: 'MySQL', subtitle: 'Indexes, transactions & the query planner' },
 ];
 
-const fileIcon = 'M13 2v6h6';
-const folderPath = 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z';
+const num = (n) => String(n + 1).padStart(2, '0');
 ---
 
 <BaseLayout
@@ -51,251 +50,272 @@ const folderPath = 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2
 >
   <section class="hero wrap">
     <p class="eyebrow">Deep-dives on the systems you actually use</p>
-    <h1>Backend systems, <span class="accent">understood</span> — not memorised.</h1>
+    <h1>Backend systems,<br />understood — <span class="accent">not memorised.</span></h1>
     <p class="lede">
       I learn one system at a time, to the point where I can make design
       decisions and read other people's code. These are those notes, rewritten
       as structured deep-dives — mental models first, gotchas included.
     </p>
     <div class="cta">
-      <a class="btn" href="#topics">Browse topics</a>
+      <a class="btn" href="#topics">Browse the index</a>
       <a class="btn-ghost" href={`${base}about/`}>How this works</a>
     </div>
-    <ul class="chips" role="list">
-      <li>Mental model first</li>
-      <li>Taught to a rubric</li>
-      <li>Real gotchas, not trivia</li>
-    </ul>
+    <p class="marks">
+      Mental model first
+      <span aria-hidden="true">·</span> Taught to a rubric
+      <span aria-hidden="true">·</span> Real gotchas, not trivia
+    </p>
   </section>
 
   <section id="topics" class="topics wrap">
-    <div class="panel">
-      <div class="panel-head">
-        <span class="p-title">
-          <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
-          Topics
-        </span>
-        <span class="p-meta">{entries.length} topics · {articles.length} articles · {upcoming.length} in progress</span>
-      </div>
+    <div class="contents-head">
+      <h2>The index</h2>
+      <span class="count">{entries.length} topics · {articles.length} articles · {upcoming.length} in progress</span>
+    </div>
 
-      <ul class="list" role="list">
-        {entries.map((e) => (
-          e.kind === 'article' ? (
-            <li class="row">
-              <a href={`${base}${e.article.id}/`}>
-                <span class="ficon" aria-hidden="true">
-                  <svg viewBox="0 0 24 24" width="18" height="18"><path d="M6 2h8l4 4v16H6z"/><path d={fileIcon}/></svg>
+    <ol class="contents" role="list">
+      {entries.map((e, i) => (
+        e.kind === 'article' ? (
+          <li class="entry">
+            <a href={`${base}${e.article.id}/`}>
+              <span class="idx" aria-hidden="true">{num(i)}</span>
+              <span class="body">
+                <span class="title">{e.article.data.title}</span>
+                <span class="sub">{e.article.data.subtitle}</span>
+              </span>
+              <span class="end">
+                <span class="kind">deep-dive</span>
+                <span class="rt">{e.article.data.readingTime}</span>
+                <span class="go" aria-hidden="true">→</span>
+              </span>
+            </a>
+          </li>
+        ) : (
+          <li class="entry entry-series">
+            <details class="series">
+              <summary>
+                <span class="idx" aria-hidden="true">{num(i)}</span>
+                <span class="body">
+                  <span class="title">{e.name}
+                    <span class="badge">{e.count}-part series</span>
+                  </span>
+                  <span class="sub">{e.cover.data.subtitle}</span>
                 </span>
-                <span class="row-main">
-                  <span class="row-top">
-                    <span class="fname">{e.article.id}.md</span>
+                <span class="end">
+                  <span class="kind">series</span>
+                  <span class="rt browse">Contents</span>
+                  <span class="chev" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="15" height="15"><path d="M9 6l6 6-6 6"/></svg>
                   </span>
-                  <span class="row-title">{e.article.data.title}</span>
-                  <span class="row-sub">{e.article.data.subtitle}</span>
                 </span>
-                <span class="row-end">
-                  <span class="rt">{e.article.data.readingTime}</span>
-                  <span class="go" aria-hidden="true">→</span>
-                </span>
-              </a>
-            </li>
-          ) : (
-            <li class="row row-folder">
-              <details class="folder">
-                <summary class="folder-head">
-                  <span class="ficon" aria-hidden="true">
-                    <svg viewBox="0 0 24 24" width="18" height="18"><path d={folderPath}/></svg>
-                  </span>
-                  <span class="row-main">
-                    <span class="row-top">
-                      <span class="fname">{e.slug}/</span>
-                      <span class="tag tag-series">{e.count}-part series</span>
-                    </span>
-                    <span class="row-title">{e.name}</span>
-                    <span class="row-sub">{e.cover.data.subtitle}</span>
-                  </span>
-                  <span class="row-end">
-                    <span class="rt folder-hint">Browse parts</span>
-                    <span class="chev" aria-hidden="true">
-                      <svg viewBox="0 0 24 24" width="16" height="16"><path d="M9 6l6 6-6 6"/></svg>
-                    </span>
-                  </span>
-                </summary>
-                <ul class="chapters" role="list">
-                  <li class="chapter chapter-cover">
-                    <a href={`${base}${e.cover.id}/`}>
-                      <span class="cnum" aria-hidden="true">★</span>
-                      <span class="chapter-title">Start here — series guide</span>
-                      <span class="rt">{e.cover.data.readingTime}</span>
+              </summary>
+              <ol class="parts" role="list">
+                <li class="part part-cover">
+                  <a href={`${base}${e.cover.id}/`}>
+                    <span class="pnum" aria-hidden="true">✦</span>
+                    <span class="ptitle">Start here — series guide</span>
+                    <span class="rt">{e.cover.data.readingTime}</span>
+                    <span class="go" aria-hidden="true">→</span>
+                  </a>
+                </li>
+                {e.chapters.map((c) => (
+                  <li class="part">
+                    <a href={`${base}${c.id}/`}>
+                      <span class="pnum">{String(c.data.part).padStart(2, '0')}</span>
+                      <span class="ptitle">{c.data.title}</span>
+                      <span class="rt">{c.data.readingTime}</span>
                       <span class="go" aria-hidden="true">→</span>
                     </a>
                   </li>
-                  {e.chapters.map((c) => (
-                    <li class="chapter">
-                      <a href={`${base}${c.id}/`}>
-                        <span class="cnum">{c.data.part}</span>
-                        <span class="chapter-title">{c.data.title}</span>
-                        <span class="rt">{c.data.readingTime}</span>
-                        <span class="go" aria-hidden="true">→</span>
-                      </a>
-                    </li>
-                  ))}
-                </ul>
-              </details>
-            </li>
-          )
-        ))}
-        {upcoming.map((u) => (
-          <li class="row row-soon">
-            <span class="ficon" aria-hidden="true">
-              <svg viewBox="0 0 24 24" width="18" height="18"><path d="M6 2h8l4 4v16H6z"/><path d={fileIcon}/></svg>
-            </span>
-            <span class="row-main">
-              <span class="row-top">
-                <span class="fname">{u.id}.md</span>
-                <span class="tag tag-soon">Coming soon</span>
-              </span>
-              <span class="row-title">{u.title}</span>
-              <span class="row-sub">{u.subtitle}</span>
-            </span>
-            <span class="row-end"><span class="rt">queued</span></span>
+                ))}
+              </ol>
+            </details>
           </li>
-        ))}
-      </ul>
-    </div>
+        )
+      ))}
+      {upcoming.map((u, i) => (
+        <li class="entry entry-soon">
+          <span class="idx" aria-hidden="true">{num(entries.length + i)}</span>
+          <span class="body">
+            <span class="title">{u.title} <span class="badge badge-soon">In progress</span></span>
+            <span class="sub">{u.subtitle}</span>
+          </span>
+          <span class="end"><span class="rt">queued</span></span>
+        </li>
+      ))}
+    </ol>
   </section>
 
   <style>
-    .hero { padding: clamp(3rem, 8vw, 5.5rem) 0 clamp(2rem, 5vw, 3.5rem); }
+    .hero { padding: clamp(3.5rem, 9vw, 6rem) 0 clamp(2.5rem, 6vw, 4rem); }
     .hero h1 {
-      font-size: clamp(2.3rem, 6.5vw, 4rem);
+      font-size: var(--text-display, clamp(2.6rem, 5.2vw + 1rem, 4.6rem));
+      line-height: 1.06;
       margin: 1rem 0 0;
-      max-width: 18ch;
+      max-width: 16ch;
     }
     .hero h1 .accent { color: var(--accent); }
     .lede {
-      max-width: 40rem;
-      font-size: clamp(1.05rem, 2.2vw, 1.22rem);
-      line-height: 1.6;
+      max-width: 42rem;
+      font-size: clamp(1.1rem, 2.2vw, 1.3rem);
+      line-height: 1.62;
       color: var(--ink-soft);
-      margin: 1.4rem 0 2rem;
+      margin: 1.5rem 0 2rem;
     }
     .cta { display: flex; gap: 0.8rem; flex-wrap: wrap; }
-    .chips { list-style: none; display: flex; flex-wrap: wrap; gap: 0.6rem; margin: 2.2rem 0 0; padding: 0; }
-    .chips li {
-      font-size: 0.82rem;
-      color: var(--ink-soft);
-      background: var(--paper-raised);
-      border: 1px solid var(--line);
-      border-radius: 999px;
-      padding: 0.35rem 0.85rem;
+    .marks {
+      margin: 2.4rem 0 0;
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--ink-faint);
     }
-    .chips li::before { content: '✦'; color: var(--accent); margin-right: 0.4rem; }
+    .marks span { color: var(--accent); margin: 0 0.5rem; }
 
-    .topics { margin-bottom: 1rem; }
-
-    /* File-explorer style list */
-    .list { list-style: none; margin: 0; padding: 0; }
-    .row { border-bottom: 1px solid var(--line); }
-    .row:last-child { border-bottom: none; }
-    .row > a,
-    .row.row-soon {
+    /* ---- The index / table of contents ---- */
+    .topics { margin-bottom: 2rem; }
+    .contents-head {
       display: flex;
-      align-items: center;
+      align-items: baseline;
+      justify-content: space-between;
       gap: 1rem;
-      padding: 1rem 1.25rem;
+      padding-bottom: 0.6rem;
+      border-bottom: 3px double var(--line-strong);
+    }
+    .contents-head h2 { font-size: 1.5rem; margin: 0; }
+    .count {
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--ink-faint);
+    }
+
+    .contents { list-style: none; margin: 0; padding: 0; }
+    .entry { border-bottom: 1px solid var(--line); }
+    .entry > a,
+    .series > summary,
+    .entry-soon {
+      display: grid;
+      grid-template-columns: 2.6rem minmax(0, 1fr) auto;
+      align-items: baseline;
+      gap: 0.4rem 1.2rem;
+      padding: 1.25rem 0.25rem 1.15rem;
       text-decoration: none;
       color: inherit;
     }
-    .row > a { transition: background 0.15s ease; }
-    .row > a:hover { background: var(--paper-sunk); }
-    .ficon { color: var(--accent); flex: 0 0 auto; display: grid; place-items: center; }
-    .ficon svg { fill: none; stroke: currentColor; stroke-width: 1.7; }
-    .row-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 0.15rem; }
-    .row-top { display: flex; align-items: center; gap: 0.7rem; flex-wrap: wrap; }
-    .fname { font-family: var(--mono); font-size: 0.8rem; color: var(--ink-faint); }
-    .row-title { font-weight: 650; font-size: 1.12rem; letter-spacing: -0.01em; color: var(--ink); }
-    .row-sub { color: var(--ink-soft); font-size: 0.92rem; }
-    .row-end { flex: 0 0 auto; display: flex; align-items: center; gap: 1rem; }
-    .rt { font-family: var(--mono); font-size: 0.72rem; color: var(--ink-faint); white-space: nowrap; }
-    .go { color: var(--accent); font-size: 1.1rem; transition: transform 0.15s ease; }
-    .row > a:hover .go { transform: translateX(3px); }
+    .entry > a, .series > summary { transition: background 0.15s var(--ease-out); }
+    .entry > a:hover, .series > summary:hover { background: var(--paper-sunk); }
 
-    .tag-soon { color: var(--ink-faint); background: var(--paper-sunk); border-color: var(--line); }
-    .row-soon { opacity: 0.72; }
-
-    /* Series folder — one collapsible row that reveals its parts */
-    .row-folder { padding: 0; }
-    .folder { width: 100%; }
-    .folder-head {
-      display: flex;
-      align-items: center;
-      gap: 1rem;
-      padding: 1rem 1.25rem;
-      cursor: pointer;
-      list-style: none;
-      transition: background 0.15s ease;
+    .idx {
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      color: var(--accent);
+      padding-top: 0.28rem;
     }
-    .folder-head::-webkit-details-marker { display: none; }
-    .folder-head:hover { background: var(--paper-sunk); }
-    .folder-head:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-    .tag-series {
-      font-family: var(--mono);
-      font-size: 0.66rem;
-      letter-spacing: 0.04em;
+    .body { min-width: 0; display: flex; flex-direction: column; gap: 0.28rem; }
+    .title {
+      font-family: var(--font-display);
+      font-weight: 560;
+      font-size: 1.45rem;
+      line-height: 1.15;
+      letter-spacing: -0.015em;
+      color: var(--ink);
+      display: flex;
+      align-items: baseline;
+      gap: 0.7rem;
+      flex-wrap: wrap;
+    }
+    .sub { color: var(--ink-soft); font-size: 1rem; line-height: 1.45; max-width: 46ch; }
+    .badge {
+      font-family: var(--font-mono);
+      font-size: 0.6rem;
+      font-weight: 500;
+      letter-spacing: 0.1em;
       text-transform: uppercase;
       color: var(--accent);
-      background: var(--accent-wash, var(--paper-sunk));
-      border: 1px solid var(--line);
-      border-radius: 999px;
-      padding: 0.12rem 0.55rem;
+      padding: 0.14em 0;
+      border-bottom: 1px solid var(--accent-line);
+      align-self: center;
     }
-    .chev { color: var(--accent); display: grid; place-items: center; transition: transform 0.2s ease; }
-    .chev svg { fill: none; stroke: currentColor; stroke-width: 2; }
-    .folder[open] > .folder-head .chev { transform: rotate(90deg); }
+    .badge-soon { color: var(--ink-faint); border-bottom-color: var(--line-strong); }
 
-    .chapters {
-      list-style: none;
-      margin: 0;
-      padding: 0.25rem 0 0.5rem;
-      background: var(--paper-sunk);
-      border-top: 1px solid var(--line);
-    }
-    .chapter > a {
+    .end {
       display: flex;
       align-items: center;
       gap: 0.9rem;
-      padding: 0.55rem 1.25rem 0.55rem 3.4rem;
+      justify-self: end;
+      padding-top: 0.3rem;
+    }
+    .kind {
+      font-family: var(--font-mono);
+      font-size: 0.62rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--ink-faint);
+    }
+    .rt { font-family: var(--font-mono); font-size: 0.72rem; color: var(--ink-faint); white-space: nowrap; }
+    .go {
+      color: var(--accent);
+      font-size: 1.15rem;
+      transition: transform 0.15s var(--ease-out);
+    }
+    .entry > a:hover .go { transform: translateX(4px); }
+
+    .entry-soon { opacity: 0.62; }
+
+    /* ---- Series (collapsible) ---- */
+    .entry-series { padding: 0; }
+    .series { width: 100%; }
+    .series > summary { cursor: pointer; list-style: none; }
+    .series > summary::-webkit-details-marker { display: none; }
+    .series > summary:focus-visible { outline: 2px solid var(--color-focus); outline-offset: -2px; }
+    .browse { color: var(--accent); }
+    .chev { color: var(--accent); display: grid; place-items: center; transition: transform 0.2s var(--ease-out); }
+    .chev svg { fill: none; stroke: currentColor; stroke-width: 2; }
+    .series[open] > summary .chev { transform: rotate(90deg); }
+
+    .parts { list-style: none; margin: 0 0 0.6rem; padding: 0; border-top: 1px solid var(--line); }
+    .part > a {
+      display: grid;
+      grid-template-columns: 2.6rem minmax(0, 1fr) auto auto;
+      align-items: baseline;
+      gap: 0.9rem;
+      padding: 0.7rem 0.25rem 0.7rem 3rem;
       text-decoration: none;
       color: inherit;
-      transition: background 0.15s ease;
+      transition: background 0.12s var(--ease-out);
     }
-    .chapter > a:hover { background: var(--paper-raised); }
-    .cnum {
-      flex: 0 0 auto;
-      width: 1.55rem;
-      height: 1.55rem;
-      display: grid;
-      place-items: center;
-      font-family: var(--mono);
+    .part + .part > a,
+    .part > a { border-top: 1px solid var(--line); }
+    .part:first-child > a { border-top: none; }
+    .part > a:hover { background: var(--paper-sunk); }
+    .pnum {
+      font-family: var(--font-mono);
       font-size: 0.72rem;
       color: var(--accent);
-      background: var(--paper-raised);
-      border: 1px solid var(--line);
-      border-radius: 6px;
     }
-    .chapter-cover .cnum { border-style: dashed; }
-    .chapter-title { flex: 1 1 auto; min-width: 0; font-size: 0.96rem; font-weight: 550; color: var(--ink); }
-    .chapter-cover .chapter-title { color: var(--ink-soft); font-style: italic; }
-    .chapter .go { color: var(--accent); font-size: 1rem; transition: transform 0.15s ease; }
-    .chapter > a:hover .go { transform: translateX(3px); }
+    .part-cover .pnum { color: var(--accent); }
+    .ptitle { min-width: 0; font-size: 1.02rem; color: var(--ink); }
+    .part-cover .ptitle { color: var(--ink-soft); font-style: italic; }
+    .part .go { color: var(--accent); font-size: 1rem; transition: transform 0.15s var(--ease-out); }
+    .part > a:hover .go { transform: translateX(3px); }
 
-    @media (max-width: 34rem) {
-      .row-end .rt { display: none; }
-      .row > a, .row.row-soon { padding: 0.9rem 1rem; }
-      .folder-head { padding: 0.9rem 1rem; }
-      .chapter > a { padding-left: 2.6rem; }
-      .chapter .rt { display: none; }
+    @media (max-width: 40rem) {
+      .entry > a, .series > summary, .entry-soon {
+        grid-template-columns: 2rem minmax(0, 1fr);
+        gap: 0.3rem 0.9rem;
+      }
+      .title { font-size: 1.25rem; }
+      .end {
+        grid-column: 2;
+        justify-self: start;
+        padding-top: 0.4rem;
+      }
+      .kind { display: none; }
+      .part > a { grid-template-columns: 2rem minmax(0, 1fr) auto; padding-left: 2.2rem; }
+      .part .go { display: none; }
     }
   </style>
 </BaseLayout>

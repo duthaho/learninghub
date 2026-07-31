@@ -1,5 +1,4 @@
 ---
-import Panel from './Panel.astro';
 import { newsletter, subscribeUrl } from '../site.config';
 
 interface Props {
@@ -10,35 +9,34 @@ const { variant = 'card' } = Astro.props;
 ---
 
 {newsletter.enabled && (
-  <Panel title="Newsletter" meta="substack" class={`nl nl-${variant}`}>
-    <div class="nl-inner">
-      <div class="nl-copy">
-        <p class="nl-title">{newsletter.title}</p>
-        <p class="nl-blurb">{newsletter.blurb}</p>
-      </div>
-      <form
-        class="nl-form"
-        action={subscribeUrl}
-        method="get"
-        target="_blank"
-        rel="noopener"
-        data-subscribe={subscribeUrl}
-      >
-        <label class="sr-only" for={`nl-email-${variant}`}>Email address</label>
-        <input
-          id={`nl-email-${variant}`}
-          class="nl-input"
-          type="email"
-          name="email"
-          inputmode="email"
-          autocomplete="email"
-          placeholder="you@example.com"
-          required
-        />
-        <button class="btn nl-btn" type="submit">{newsletter.cta}</button>
-      </form>
+  <section class={`nl nl-${variant}`}>
+    <div class="nl-copy">
+      <p class="side-label">Newsletter · Substack</p>
+      <p class="nl-title">{newsletter.title}</p>
+      <p class="nl-blurb">{newsletter.blurb}</p>
     </div>
-  </Panel>
+    <form
+      class="nl-form"
+      action={subscribeUrl}
+      method="get"
+      target="_blank"
+      rel="noopener"
+      data-subscribe={subscribeUrl}
+    >
+      <label class="sr-only" for={`nl-email-${variant}`}>Email address</label>
+      <input
+        id={`nl-email-${variant}`}
+        class="nl-input"
+        type="email"
+        name="email"
+        inputmode="email"
+        autocomplete="email"
+        placeholder="you@example.com"
+        required
+      />
+      <button class="btn nl-btn" type="submit">{newsletter.cta}</button>
+    </form>
+  </section>
 )}
 
 <script>
@@ -60,27 +58,35 @@ const { variant = 'card' } = Astro.props;
     position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
     overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
   }
-  .nl-title { font-weight: 650; font-size: 0.98rem; margin: 0 0 0.35rem; color: var(--ink); }
-  .nl-blurb { margin: 0 0 1rem; font-size: 0.88rem; line-height: 1.55; color: var(--ink-soft); }
+  .side-label {
+    font-family: var(--font-mono);
+    font-size: 0.64rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin: 0 0 0.7rem;
+  }
+  .nl-title { font-family: var(--font-display); font-weight: 560; font-size: 1.12rem; margin: 0 0 0.4rem; color: var(--ink); }
+  .nl-blurb { margin: 0 0 1rem; font-size: 0.92rem; line-height: 1.55; color: var(--ink-soft); }
 
   .nl-form { display: flex; flex-direction: column; gap: 0.5rem; }
   .nl-input {
     width: 100%;
-    padding: 0.55rem 0.7rem;
-    font-family: var(--sans);
-    font-size: 0.9rem;
+    padding: 0.6rem 0.7rem;
+    font-family: var(--font-body);
+    font-size: 0.95rem;
     color: var(--ink);
     background: var(--paper);
     border: 1px solid var(--line-strong);
     border-radius: var(--radius-sm);
-    transition: border-color 0.15s ease;
+    transition: border-color 0.15s var(--ease-out);
   }
   .nl-input::placeholder { color: var(--ink-faint); }
-  .nl-input:focus-visible { outline: none; border-color: var(--accent); }
+  .nl-input:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-wash); }
   .nl-btn { width: 100%; }
 
-  /* Wide variant (homepage): copy left, form right */
-  .nl-wide .nl-inner { display: flex; gap: 1.5rem 2rem; align-items: center; flex-wrap: wrap; }
+  /* Wide variant (homepage band): copy left, form right */
+  .nl-wide { display: flex; gap: 1.5rem 2.5rem; align-items: center; flex-wrap: wrap; }
   .nl-wide .nl-copy { flex: 1 1 20rem; }
   .nl-wide .nl-blurb { margin-bottom: 0; }
   .nl-wide .nl-form { flex: 1 1 18rem; flex-direction: row; }

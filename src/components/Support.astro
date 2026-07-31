@@ -1,10 +1,9 @@
 ---
-import Panel from './Panel.astro';
 import { support, supportUrl } from '../site.config';
 
 interface Props {
-  // 'card'   — titled panel with blurb + button (article sidebar)
-  // 'inline' — a single compact button (footer)
+  // 'card'   — labelled block with blurb + button (article sidebar)
+  // 'inline' — a single compact link (footer)
   variant?: 'card' | 'inline';
 }
 const { variant = 'card' } = Astro.props;
@@ -16,32 +15,36 @@ const { variant = 'card' } = Astro.props;
       <span aria-hidden="true">☕</span> {support.label}
     </a>
   ) : (
-    <Panel title="Support the work" meta="☕">
+    <section class="support">
+      <p class="side-label">Support the work</p>
       <p class="blurb">{support.blurb}</p>
-      <a class="btn support-btn" href={supportUrl} target="_blank" rel="noopener noreferrer">
+      <a class="btn-ghost support-btn" href={supportUrl} target="_blank" rel="noopener noreferrer">
         <span aria-hidden="true">☕</span> {support.label}
       </a>
-    </Panel>
+    </section>
   )
 )}
 
 <style>
-  .blurb { margin: 0 0 1rem; font-size: 0.9rem; color: var(--ink-soft); line-height: 1.55; }
+  .side-label {
+    font-family: var(--font-mono);
+    font-size: 0.64rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin: 0 0 0.7rem;
+  }
+  .blurb { margin: 0 0 1rem; font-size: 0.92rem; color: var(--ink-soft); line-height: 1.55; }
   .support-btn { width: 100%; }
 
   .bmc-inline {
     display: inline-flex;
     align-items: center;
     gap: 0.45em;
-    font-size: 0.88rem;
-    font-weight: 550;
-    text-decoration: none;
-    color: #1a1608;
-    background: #ffdd00;
-    border: 1px solid color-mix(in srgb, #ffdd00 70%, #b58b00);
-    padding: 0.5em 0.95em;
-    border-radius: 9px;
-    transition: transform 0.15s ease;
+    font-size: 0.95rem;
+    color: var(--ink-soft);
+    border-bottom: 1px solid transparent;
+    transition: color 0.15s var(--ease-out), border-color 0.15s var(--ease-out);
   }
-  .bmc-inline:hover { transform: translateY(-1px); color: #1a1608; }
+  .bmc-inline:hover { color: var(--accent-ink); border-bottom-color: var(--accent); }
 </style>

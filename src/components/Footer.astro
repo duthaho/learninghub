@@ -6,38 +6,89 @@ const base = import.meta.env.BASE_URL;
 const year = new Date().getFullYear();
 ---
 
-<footer class="site-footer">
+<footer class="colophon">
+  <hr class="rule-double" />
   <div class="wrap inner">
-    <span class="copy">© {year} <b>learning<span>hub</span></b></span>
+    <div class="mark">
+      <span class="logo">learning<span>hub</span></span>
+      <p class="note">
+        Written from real study notes, one backend system at a time.
+        Set in Fraunces &amp; Source&nbsp;Serif&nbsp;4.
+      </p>
+    </div>
+
     <nav class="links" aria-label="Footer">
+      <span class="lbl">Index</span>
       <a href={`${base}#topics`}>Topics</a>
       <a href={`${base}about/`}>About</a>
       <a href="https://github.com/duthaho/learninghub" target="_blank" rel="noopener noreferrer">GitHub</a>
       {support.enabled && showSupport && (
-        <a href={supportUrl} target="_blank" rel="noopener noreferrer">☕ Coffee</a>
+        <a href={supportUrl} target="_blank" rel="noopener noreferrer">Buy me a coffee</a>
       )}
     </nav>
+  </div>
+  <div class="wrap base">
+    <span>© {year} learninghub</span>
+    <span>duthaho · learning in public</span>
   </div>
 </footer>
 
 <style>
-  .site-footer {
-    margin-top: 4rem;
-    border-top: 1px solid var(--line);
-    background: var(--paper-raised);
-  }
+  .colophon { margin-top: 5rem; }
+  .rule-double { margin: 0; }
   .inner {
+    display: grid;
+    grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
+    gap: 1.5rem 3rem;
+    padding: 2rem 0 1.4rem;
+  }
+  .logo {
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 1.25rem;
+    letter-spacing: -0.02em;
+    color: var(--ink);
+  }
+  .logo span { color: var(--accent); }
+  .note {
+    margin: 0.5rem 0 0;
+    max-width: 32ch;
+    font-size: 0.92rem;
+    line-height: 1.55;
+    color: var(--ink-soft);
+  }
+
+  .links { display: flex; flex-direction: column; gap: 0.55rem; align-items: start; }
+  .lbl {
+    font-family: var(--font-mono);
+    font-size: 0.64rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin-bottom: 0.15rem;
+  }
+  .links a {
+    color: var(--ink-soft);
+    font-size: 0.95rem;
+    border-bottom: 1px solid transparent;
+    transition: color 0.15s var(--ease-out), border-color 0.15s var(--ease-out);
+  }
+  .links a:hover { color: var(--accent-ink); border-bottom-color: var(--accent); }
+
+  .base {
     display: flex;
-    align-items: center;
     justify-content: space-between;
     gap: 1rem;
     flex-wrap: wrap;
-    padding: 1.4rem 0;
+    padding: 0.9rem 0 1.6rem;
+    border-top: 1px solid var(--line);
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.06em;
+    color: var(--ink-faint);
   }
-  .copy { font-family: var(--mono); font-size: 0.8rem; color: var(--ink-faint); }
-  .copy b { font-weight: 700; color: var(--ink-soft); }
-  .copy span { color: var(--accent); }
-  .links { display: flex; gap: 1.3rem; }
-  .links a { color: var(--ink-soft); font-size: 0.88rem; font-weight: 500; }
-  .links a:hover { color: var(--accent-ink); }
+
+  @media (max-width: 40rem) {
+    .inner { grid-template-columns: 1fr; gap: 1.5rem; }
+  }
 </style>
