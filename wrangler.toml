@@ -1,6 +1,11 @@
-# Cloudflare Pages project config.
-# Lets both the dashboard (Git integration) and `wrangler pages deploy`
-# know the project name and where the static build lands.
+# Cloudflare Workers static-assets config.
+# This project deploys via `wrangler deploy` (Workers Builds), serving the
+# static Astro build straight from an assets-only Worker — no Worker script.
 name = "duthaho-learninghub"
 compatibility_date = "2024-11-01"
-pages_build_output_dir = "dist"
+
+[assets]
+directory = "./dist"
+# Serve pretty URLs (/about → /about/index.html) and a real 404.
+html_handling = "auto-trailing-slash"
+not_found_handling = "404-page"

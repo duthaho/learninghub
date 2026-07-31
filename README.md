@@ -67,20 +67,22 @@ are chosen by env vars (see `astro.config.mjs`):
 
 | Host | URL | `SITE` | `BASE_PATH` |
 |------|-----|--------|-------------|
-| **Cloudflare Pages** (primary) | `https://learninghub.duthaho.dev` | *(default)* | `/` *(default)* |
+| **Cloudflare Workers** (primary) | `https://learninghub.duthaho.dev` | *(default)* | `/` *(default)* |
 | **GitHub Pages** (mirror) | `https://duthaho.github.io/learninghub` | set in CI | `/learninghub/` |
 
 Cloudflare builds with no extra env, so it gets the root-domain defaults. The
 GitHub Actions workflow sets `SITE` + `BASE_PATH` for the subpath.
 
-### Cloudflare Pages (project `duthaho-learninghub`)
+### Cloudflare Workers (project `duthaho-learninghub`)
 
-1. **Create the project** — Cloudflare dashboard → *Workers & Pages* → *Create* →
-   *Pages* → *Connect to Git* → pick `duthaho/learninghub`.
-2. **Build settings:** framework preset **Astro**, build command `npm run build`,
-   output directory `dist` (also in `wrangler.toml`). Node 22 is pinned via `.nvmrc`.
-3. **Custom domain:** project → *Custom domains* → *Set up a domain* →
-   `learninghub.duthaho.dev`. If `duthaho.dev` is on Cloudflare DNS, the CNAME is
-   added automatically; otherwise add `CNAME learninghub → duthaho-learninghub.pages.dev`.
+This deploys as an **assets-only Worker** (Workers Builds → `wrangler deploy`),
+serving `dist/` directly. Config lives in `wrangler.toml` (`[assets]`).
 
-CLI alternative: `npx wrangler pages deploy dist --project-name duthaho-learninghub`.
+- **Build command:** `npm run build` · **Deploy command:** `npx wrangler deploy`
+- Node 22 is pinned via `.nvmrc`; pretty URLs + a real `404.html` are handled
+  by `html_handling` / `not_found_handling` in `wrangler.toml`.
+- **Custom domain:** Worker → *Settings* → *Domains & Routes* → *Add* → Custom
+  Domain → `learninghub.duthaho.dev` (adds the DNS record automatically when
+  `duthaho.dev` is on Cloudflare).
+
+Local deploy: `npm run build && npx wrangler deploy`.
