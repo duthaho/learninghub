@@ -27,14 +27,14 @@ read other people's Elasticsearch code with confidence.
 
 ## The eight parts
 
-1. **[Elasticsearch, from the ground up](/learninghub/elasticsearch-01-mental-model/)** — the inverted index, how it differs from a relational database, and why Elasticsearch complements your database rather than replacing it.
-2. **[Documents, mappings & the shape of your data](/learninghub/elasticsearch-02-documents-and-mappings/)** — field types, `text` vs `keyword`, dynamic vs explicit mapping, CRUD over REST, and why documents are immutable underneath.
-3. **[How Elasticsearch reads text](/learninghub/elasticsearch-03-text-analysis/)** — the analysis pipeline, why the same analyzer runs at index *and* query time, and the silent zero-hit bugs that follow when it doesn't.
-4. **[The Query DSL](/learninghub/elasticsearch-04-query-dsl/)** — `match`, `term` and `bool`, and the crucial split between query context (scored) and filter context (yes/no and cacheable).
-5. **[Why results come back ranked: BM25](/learninghub/elasticsearch-05-relevance-and-bm25/)** — term frequency, rarity and field length, and why `_score` is never comparable across queries.
-6. **[Aggregations: the analytics engine](/learninghub/elasticsearch-06-aggregations/)** — metric vs bucket aggregations, nesting, and why you aggregate on `keyword`, never analyzed `text`.
-7. **[Running at scale](/learninghub/elasticsearch-07-scale-and-the-write-path/)** — shards, replicas and cluster health, plus the write path: the bulk API, and refresh vs flush vs translog.
-8. **[When to reach for Elasticsearch](/learninghub/elasticsearch-08-design-decisions/)** — what it's great at, what it isn't, the database-plus-Elasticsearch architecture, and the anti-patterns to avoid.
+1. **[Elasticsearch, from the ground up](/elasticsearch-01-mental-model/)** — the inverted index, how it differs from a relational database, and why Elasticsearch complements your database rather than replacing it.
+2. **[Documents, mappings & the shape of your data](/elasticsearch-02-documents-and-mappings/)** — field types, `text` vs `keyword`, dynamic vs explicit mapping, CRUD over REST, and why documents are immutable underneath.
+3. **[How Elasticsearch reads text](/elasticsearch-03-text-analysis/)** — the analysis pipeline, why the same analyzer runs at index *and* query time, and the silent zero-hit bugs that follow when it doesn't.
+4. **[The Query DSL](/elasticsearch-04-query-dsl/)** — `match`, `term` and `bool`, and the crucial split between query context (scored) and filter context (yes/no and cacheable).
+5. **[Why results come back ranked: BM25](/elasticsearch-05-relevance-and-bm25/)** — term frequency, rarity and field length, and why `_score` is never comparable across queries.
+6. **[Aggregations: the analytics engine](/elasticsearch-06-aggregations/)** — metric vs bucket aggregations, nesting, and why you aggregate on `keyword`, never analyzed `text`.
+7. **[Running at scale](/elasticsearch-07-scale-and-the-write-path/)** — shards, replicas and cluster health, plus the write path: the bulk API, and refresh vs flush vs translog.
+8. **[When to reach for Elasticsearch](/elasticsearch-08-design-decisions/)** — what it's great at, what it isn't, the database-plus-Elasticsearch architecture, and the anti-patterns to avoid.
 
 ## How to read it
 
@@ -45,4 +45,4 @@ analytics. Parts 7–8 are the operational and design judgment that turn "I can
 run a query" into "I can decide where Elasticsearch belongs."
 
 > Everything version-sensitive here was checked against Elasticsearch 9.x; the
-> concepts are stable across 8.x and 9.x. Start with [Part 1](/learninghub/elasticsearch-01-mental-model/).
+> concepts are stable across 8.x and 9.x. Start with [Part 1](/elasticsearch-01-mental-model/).

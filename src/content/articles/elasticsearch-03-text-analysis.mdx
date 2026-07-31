@@ -13,7 +13,7 @@ part: 3
 
 import Callout from '../../components/Callout.astro';
 
-*Elasticsearch deep-dive · Part 3 of 8. Previous: [Documents, mappings & the shape of your data](/learninghub/elasticsearch-02-documents-and-mappings/) · Next: [The Query DSL](/learninghub/elasticsearch-04-query-dsl/).*
+*Elasticsearch deep-dive · Part 3 of 8. Previous: [Documents, mappings & the shape of your data](/elasticsearch-02-documents-and-mappings/) · Next: [The Query DSL](/elasticsearch-04-query-dsl/).*
 
 Part 1 gave you the load-bearing idea: an inverted index maps **terms** to the document IDs that contain them. Search a term, get back the docs — fast, because the lookup is a dictionary hit, not a scan.
 
@@ -138,7 +138,7 @@ Zero hits. No error.
   stored **with** analysis — a mismatch by omission. Rule of thumb: use `match`
   (analyzed) on `text` fields, and `term` (not analyzed) on `keyword` fields.
   We formalize `match` vs `term` in
-  [Part 4](/learninghub/elasticsearch-04-query-dsl/).
+  [Part 4](/elasticsearch-04-query-dsl/).
 </Callout>
 
 ## Gotcha 2: the standard analyzer doesn't stem
@@ -178,8 +178,8 @@ Getting a hit is a matter of choosing the query type that lines up with how the 
 
 Everything downstream builds on this pipeline:
 
-- **[The Query DSL (Part 4)](/learninghub/elasticsearch-04-query-dsl/)** formalizes the `match` vs `term` distinction you just met, along with the rest of the query and filter vocabulary. With the analyzer model in hand, those queries stop being magic and become predictable.
-- **[Aggregations (Part 6)](/learninghub/elasticsearch-06-aggregations/)** lean on `keyword` fields for exactly the reason this article explains: aggregating and sorting need one exact term per value, which is what the `keyword` analyzer gives you and the `standard` analyzer destroys.
+- **[The Query DSL (Part 4)](/elasticsearch-04-query-dsl/)** formalizes the `match` vs `term` distinction you just met, along with the rest of the query and filter vocabulary. With the analyzer model in hand, those queries stop being magic and become predictable.
+- **[Aggregations (Part 6)](/elasticsearch-06-aggregations/)** lean on `keyword` fields for exactly the reason this article explains: aggregating and sorting need one exact term per value, which is what the `keyword` analyzer gives you and the `standard` analyzer destroys.
 
 > If you can predict when a `term` query will return nothing — and explain why a
 > search for `"keyboards"` may fail to find a document containing `"keyboard"` —

@@ -13,7 +13,7 @@ part: 5
 
 import Callout from '../../components/Callout.astro';
 
-*Elasticsearch deep-dive · Part 5 of 8. Previous: [The Query DSL](/learninghub/elasticsearch-04-query-dsl/) · Next: [Aggregations: the analytics engine](/learninghub/elasticsearch-06-aggregations/).*
+*Elasticsearch deep-dive · Part 5 of 8. Previous: [The Query DSL](/elasticsearch-04-query-dsl/) · Next: [Aggregations: the analytics engine](/elasticsearch-06-aggregations/).*
 
 Part 1 made a claim and then moved on: Elasticsearch returns results **ranked**, not just matched. A SQL `WHERE name LIKE '%keyboard%'` gives you rows that match — in whatever order the database felt like. Elasticsearch gives you rows *sorted by how well they match*, and it attaches a number, the `_score`, to each one.
 
@@ -129,9 +129,9 @@ So what do you do when you genuinely need an absolute or normalized notion of re
 You now have a mental model that predicts rankings. Everything else in relevance is a way to *bend* that model on purpose:
 
 - **Relevance tuning** — boosting one field over another (a match in `name` should count more than one in `description`), or reshaping scores entirely with `function_score` (recency, popularity, price).
-- **Analyzers** — synonyms and stemming from [Part 3: Text Analysis](/learninghub/elasticsearch-03-text-analysis/) decide *what counts as a match* in the first place, which is upstream of every score BM25 computes.
+- **Analyzers** — synonyms and stemming from [Part 3: Text Analysis](/elasticsearch-03-text-analysis/) decide *what counts as a match* in the first place, which is upstream of every score BM25 computes.
 
-But the pivot from here is bigger than tuning search. In [Part 6: aggregations](/learninghub/elasticsearch-06-aggregations/), we stop asking "which documents match?" and start asking "what do the matching documents *tell me* in aggregate?" — the move from search engine to analytics engine.
+But the pivot from here is bigger than tuning search. In [Part 6: aggregations](/elasticsearch-06-aggregations/), we stop asking "which documents match?" and start asking "what do the matching documents *tell me* in aggregate?" — the move from search engine to analytics engine.
 
 > If you can predict which of two products scores higher for a given query — and
 > explain why in terms of rarity, saturation, and field length — you understand

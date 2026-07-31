@@ -13,7 +13,7 @@ part: 8
 
 import Callout from '../../components/Callout.astro';
 
-*Elasticsearch deep-dive · Part 8 of 8. Previous: [Running at scale](/learninghub/elasticsearch-07-scale-and-the-write-path/).*
+*Elasticsearch deep-dive · Part 8 of 8. Previous: [Running at scale](/elasticsearch-07-scale-and-the-write-path/).*
 
 Seven parts in, you can describe the inverted index, tune an analyzer, write a
 `bool` query, reason about BM25, build an aggregation, and shard a cluster. But
@@ -34,15 +34,15 @@ always the right call.
 
 **Full-text search.** This is the reason Elasticsearch exists. The inverted index
 turns "find documents containing these words" into a lookup instead of a scan
-([Part 1](/learninghub/elasticsearch-01-mental-model/)), and BM25 ranks the
+([Part 1](/elasticsearch-01-mental-model/)), and BM25 ranks the
 matches by relevance so the best result comes back first
-([Part 5](/learninghub/elasticsearch-05-relevance-and-bm25/)). Nothing in a
+([Part 5](/elasticsearch-05-relevance-and-bm25/)). Nothing in a
 relational database competes here. `LIKE '%term%'` can't rank, can't handle
 typos, can't tokenise, and can't use an index for a leading wildcard. When the
 requirement is "a search box that feels like Google," this is home ground.
 
 **Analytics over large data.** Aggregations run fast over enormous document sets
-([Part 6](/learninghub/elasticsearch-06-aggregations/)): faceted search sidebars,
+([Part 6](/elasticsearch-06-aggregations/)): faceted search sidebars,
 metrics dashboards, "top N" breakdowns, date histograms. The same columnar
 structures that make search fast make bucketing and metric computation fast, so
 you can slice millions of documents in near-interactive time.
@@ -51,7 +51,7 @@ you can slice millions of documents in near-interactive time.
 append-mostly, time-based, enormous in volume, and needs to be both searched
 ("find this error string") and aggregated ("errors per minute by service"). That
 plays directly to Elasticsearch's strengths in bulk ingest and time-based
-sharding ([Part 7](/learninghub/elasticsearch-07-scale-and-the-write-path/)) —
+sharding ([Part 7](/elasticsearch-07-scale-and-the-write-path/)) —
 which is why observability stacks were one of its first mass adoptions.
 
 ## What Elasticsearch is not
@@ -59,7 +59,7 @@ which is why observability stacks were one of its first mass adoptions.
 The failures come from asking Elasticsearch to be things it was never built to be.
 
 **Not a system of record.** There are no ACID transactions and no multi-document
-atomicity ([Part 1](/learninghub/elasticsearch-01-mental-model/)). You cannot
+atomicity ([Part 1](/elasticsearch-01-mental-model/)). You cannot
 wrap "debit this account, credit that one" in a transaction that either fully
 happens or fully doesn't. Two writers updating the same document can lose a race
 in ways a relational database's row locks and transactions would prevent. If
@@ -67,14 +67,14 @@ correctness under concurrent writes is the requirement, Elasticsearch is the
 wrong tool.
 
 **Near-real-time, not real-time.** New documents become searchable after a
-refresh — roughly a second by default ([Part 7](/learninghub/elasticsearch-07-scale-and-the-write-path/)).
+refresh — roughly a second by default ([Part 7](/elasticsearch-07-scale-and-the-write-path/)).
 For a search index that lag is invisible and completely fine. For a
 read-your-write flow — "I just saved this, now show it to me" — that same lag is
 a bug. Elasticsearch makes writes *durable* quickly, but *visible to search*
 only after the next refresh.
 
 **Weak at heavy updates.** Segments are immutable, so an update is really a
-delete-and-reindex of the *whole* document ([Part 2](/learninghub/elasticsearch-02-documents-and-mappings/)) —
+delete-and-reindex of the *whole* document ([Part 2](/elasticsearch-02-documents-and-mappings/)) —
 even to change one field. A dataset that mutates constantly generates a churn of
 deleted documents and merge pressure, fighting the very model that makes reads
 fast. High-frequency mutation is exactly the workload Elasticsearch handles
@@ -98,9 +98,9 @@ one.
 </Callout>
 
 This pattern is why the earlier parts kept pointing at it. Using your database
-primary key as the Elasticsearch `_id` ([Part 2](/learninghub/elasticsearch-02-documents-and-mappings/))
+primary key as the Elasticsearch `_id` ([Part 2](/elasticsearch-02-documents-and-mappings/))
 lets a sync process upsert a row into its matching document idempotently. Bulk
-indexing ([Part 7](/learninghub/elasticsearch-07-scale-and-the-write-path/)) is
+indexing ([Part 7](/elasticsearch-07-scale-and-the-write-path/)) is
 the efficient way to push those changes across. Those weren't isolated tips —
 they're the glue of exactly this architecture.
 
@@ -143,18 +143,18 @@ their tell is half the skill.
    with no other database behind it. That's a data-loss risk — no ACID means no
    safe transactions — and it makes joins and mutations painful. The tell is an
    architecture diagram with no database in it.
-2. **Oversharding.** Too many tiny shards ([Part 7](/learninghub/elasticsearch-07-scale-and-the-write-path/))
+2. **Oversharding.** Too many tiny shards ([Part 7](/elasticsearch-07-scale-and-the-write-path/))
    exhaust heap with per-shard overhead and slow every query, since each shard is
    searched separately. It's hard to undo — shard count is fixed at index
    creation, so fixing it means a reindex.
 3. **`text` where you needed `keyword`.** The most common mapping mistake
-   ([Parts 2](/learninghub/elasticsearch-02-documents-and-mappings/) and
-   [6](/learninghub/elasticsearch-06-aggregations/)). Analysed `text` doesn't
+   ([Parts 2](/elasticsearch-02-documents-and-mappings/) and
+   [6](/elasticsearch-06-aggregations/)). Analysed `text` doesn't
    support sorting, exact filtering, or aggregation the way you expect — it
    silently misbehaves or errors, because the field was tokenised instead of kept
    whole.
 4. **Ignoring bulk per-item errors.** A bulk request can return HTTP 200 while
-   *individual* items failed ([Part 7](/learninghub/elasticsearch-07-scale-and-the-write-path/)).
+   *individual* items failed ([Part 7](/elasticsearch-07-scale-and-the-write-path/)).
    Treat the 200 as "all indexed" and you silently drop documents. You have to
    inspect the `errors` flag and each item's status.
 5. **Using Elasticsearch for high-frequency updates.** Hammering the
@@ -185,13 +185,13 @@ whole game. Everything else is detail.
 
 Eight parts, in order — so this finale doubles as a map of the whole deep-dive:
 
-1. [Elasticsearch, from the ground up](/learninghub/elasticsearch-01-mental-model/)
-2. [Documents, mappings & the shape of your data](/learninghub/elasticsearch-02-documents-and-mappings/)
-3. [How Elasticsearch reads text](/learninghub/elasticsearch-03-text-analysis/)
-4. [The Query DSL](/learninghub/elasticsearch-04-query-dsl/)
-5. [Why results come back ranked: BM25](/learninghub/elasticsearch-05-relevance-and-bm25/)
-6. [Aggregations: the analytics engine](/learninghub/elasticsearch-06-aggregations/)
-7. [Running at scale](/learninghub/elasticsearch-07-scale-and-the-write-path/)
+1. [Elasticsearch, from the ground up](/elasticsearch-01-mental-model/)
+2. [Documents, mappings & the shape of your data](/elasticsearch-02-documents-and-mappings/)
+3. [How Elasticsearch reads text](/elasticsearch-03-text-analysis/)
+4. [The Query DSL](/elasticsearch-04-query-dsl/)
+5. [Why results come back ranked: BM25](/elasticsearch-05-relevance-and-bm25/)
+6. [Aggregations: the analytics engine](/elasticsearch-06-aggregations/)
+7. [Running at scale](/elasticsearch-07-scale-and-the-write-path/)
 8. When to reach for Elasticsearch *(this article)*
 
 Each part was a piece of the same picture: the index and analysis parts told you

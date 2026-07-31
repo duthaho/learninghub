@@ -13,7 +13,7 @@ part: 2
 
 import Callout from '../../components/Callout.astro';
 
-*Elasticsearch deep-dive · Part 2 of 8. Previous: [Elasticsearch, from the ground up](/learninghub/elasticsearch-01-mental-model/) · Next: [How Elasticsearch reads text](/learninghub/elasticsearch-03-text-analysis/).*
+*Elasticsearch deep-dive · Part 2 of 8. Previous: [Elasticsearch, from the ground up](/elasticsearch-01-mental-model/) · Next: [How Elasticsearch reads text](/elasticsearch-03-text-analysis/).*
 
 In Part 1 we drew the rough equivalence: an index is roughly a table, and a document is roughly a row. That gets you oriented, but it dodges the question a backend engineer asks next. When you send Elasticsearch a lump of JSON, how does it know that `name` is searchable text, `price` is a number you can sort and filter on ranges, and `created_at` is a date it can bucket by month? A relational database knows because you wrote `CREATE TABLE` first. Elasticsearch knows because of the **mapping** — and the twist is that it will happily write that mapping for you, from the first document you send, whether you meant it to or not.
 
@@ -50,7 +50,7 @@ Map that same string as `keyword` and Elasticsearch stores it as **one exact tok
   nothing at all — it keeps the string whole as a single term. Same input,
   different processing, and every behavioural difference (searchable vs
   groupable, partial vs exact) falls out of that one choice. We unpack *how*
-  analysis actually works in [Part 3](/learninghub/elasticsearch-03-text-analysis/);
+  analysis actually works in [Part 3](/elasticsearch-03-text-analysis/);
   for now, hold the reframe: not two types, two treatments.
 </Callout>
 
@@ -216,7 +216,7 @@ The rule that falls out of this is short: **let your source of truth own the id.
 
 We keep circling one unanswered question: *what does "analysed" actually mean?* We've said `text` gets split and lowercased into terms while `keyword` is left whole, and that this single choice decides everything about how a field behaves. That's the promise Part 3 pays off.
 
-[**How Elasticsearch reads text**](/learninghub/elasticsearch-03-text-analysis/) opens up the analyzer: how a string becomes tokens, what the standard analyzer does to your product names, and why the *same* query text has to go through the *same* analysis as the indexed text for a match to happen. It's the *why* underneath the `text`-vs-`keyword` rule you just learned to apply.
+[**How Elasticsearch reads text**](/elasticsearch-03-text-analysis/) opens up the analyzer: how a string becomes tokens, what the standard analyzer does to your product names, and why the *same* query text has to go through the *same* analysis as the indexed text for a match to happen. It's the *why* underneath the `text`-vs-`keyword` rule you just learned to apply.
 
 > If you can explain why you `PUT` with the Postgres id instead of `POST`, and
 > why a wrong first-guess type means a full reindex rather than an `ALTER TABLE`,

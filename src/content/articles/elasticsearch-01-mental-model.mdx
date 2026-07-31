@@ -13,7 +13,7 @@ part: 1
 
 import Callout from '../../components/Callout.astro';
 
-*Elasticsearch deep-dive · Part 1 of 8. Next: [Documents, mappings & the shape of your data](/learninghub/elasticsearch-02-documents-and-mappings/).*
+*Elasticsearch deep-dive · Part 1 of 8. Next: [Documents, mappings & the shape of your data](/elasticsearch-02-documents-and-mappings/).*
 
 Most people meet Elasticsearch as one of two things: "the search box" behind a
 site's search bar, or "a fast JSON store" they can throw documents at. Both are
@@ -205,11 +205,11 @@ consequences of that one idea rather than a pile of features to memorize:
 - **Mappings & field types** — how Elasticsearch knows a field is searchable text
   versus a number, a date, or an exact keyword, and why that decision shapes
   everything downstream.
-- **[Text analysis](/learninghub/elasticsearch-03-text-analysis/)** — the exact
+- **[Text analysis](/elasticsearch-03-text-analysis/)** — the exact
   process that turns a string like `"Wireless Keyboards!"` into terms such as
   `[wireless, keyboards]`, including lowercasing and stripping punctuation — and
   why matching a plural to its singular takes more than the default analyzer.
-- **[The Query DSL](/learninghub/elasticsearch-04-query-dsl/)** — the JSON
+- **[The Query DSL](/elasticsearch-04-query-dsl/)** — the JSON
   language for asking questions, and the crucial split between *filtering* (yes/no,
   cacheable) and *querying* (scored).
 - **BM25 relevance** — the actual math behind "why did this document rank first,"
@@ -218,7 +218,7 @@ consequences of that one idea rather than a pile of features to memorize:
   just search ones.
 - **Distributed sharding** — how one index is split across machines so it can
   hold and search far more than one node could.
-- **[Design decisions](/learninghub/elasticsearch-08-design-decisions/)** — the
+- **[Design decisions](/elasticsearch-08-design-decisions/)** — the
   judgment of *when* to reach for Elasticsearch at all, and when your database
   already has you covered.
 

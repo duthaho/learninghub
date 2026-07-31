@@ -13,7 +13,7 @@ part: 7
 
 import Callout from '../../components/Callout.astro';
 
-*Elasticsearch deep-dive · Part 7 of 8. Previous: [Aggregations: the analytics engine](/learninghub/elasticsearch-06-aggregations/) · Next: [When to reach for Elasticsearch](/learninghub/elasticsearch-08-design-decisions/).*
+*Elasticsearch deep-dive · Part 7 of 8. Previous: [Aggregations: the analytics engine](/elasticsearch-06-aggregations/) · Next: [When to reach for Elasticsearch](/elasticsearch-08-design-decisions/).*
 
 Everything in this series so far has quietly run on **one index**, and you've been picturing it as a single thing sitting on a single machine. That picture is fine for learning queries and mappings. It falls apart the moment someone asks the two questions that actually decide whether Elasticsearch stays up in production: how does one index hold **a billion documents** when no single machine has the RAM or disk for it — and what happens when one of those machines simply **dies** at 3am?
 
@@ -185,6 +185,6 @@ Notice how much of this reuses earlier parts: **PK-as-`_id`** (Part 2) so re-run
 
 ## Where this goes next
 
-You now have the operational half of Elasticsearch: how an index survives scale and machine death, and exactly what happens to a document between "indexed" and "searchable and durable." The final part, [Part 8: design decisions](/learninghub/elasticsearch-08-design-decisions/), steps back from mechanics to judgement — *when* Elasticsearch is the right tool at all, and when reaching for it is a mistake.
+You now have the operational half of Elasticsearch: how an index survives scale and machine death, and exactly what happens to a document between "indexed" and "searchable and durable." The final part, [Part 8: design decisions](/elasticsearch-08-design-decisions/), steps back from mechanics to judgement — *when* Elasticsearch is the right tool at all, and when reaching for it is a mistake.
 
 > If you can explain why a fresh single-node cluster is yellow rather than green, and state the difference between refresh, flush, and the translog without conflating any two of them, you understand how Elasticsearch actually runs — not just how to query it.

@@ -13,11 +13,11 @@ part: 4
 
 import Callout from '../../components/Callout.astro';
 
-*Elasticsearch deep-dive · Part 4 of 8. Previous: [How Elasticsearch reads text](/learninghub/elasticsearch-03-text-analysis/) · Next: [Why results come back ranked: BM25](/learninghub/elasticsearch-05-relevance-and-bm25/).*
+*Elasticsearch deep-dive · Part 4 of 8. Previous: [How Elasticsearch reads text](/elasticsearch-03-text-analysis/) · Next: [Why results come back ranked: BM25](/elasticsearch-05-relevance-and-bm25/).*
 
 In SQL you ask questions with a `WHERE` clause: a flat string of `AND`s, `OR`s, and comparisons. In Elasticsearch you ask questions with **JSON trees** — a structure called the **Query DSL**, where every node is a query and queries nest inside other queries. If you're building a search box for a `products` catalogue, this is the language you'll live in.
 
-Two things make the DSL click, and this part is about both: **which leaf query to use** for a given field, and **which context** that query runs in. The first decides whether your terms even match; the second decides whether the match contributes to ranking. Both build directly on [text analysis](/learninghub/elasticsearch-03-text-analysis/) — because whether a query analyzes its input is the difference between finding your documents and finding nothing at all.
+Two things make the DSL click, and this part is about both: **which leaf query to use** for a given field, and **which context** that query runs in. The first decides whether your terms even match; the second decides whether the match contributes to ranking. Both build directly on [text analysis](/elasticsearch-03-text-analysis/) — because whether a query analyzes its input is the difference between finding your documents and finding nothing at all.
 
 ## The three workhorse queries
 
@@ -168,7 +168,7 @@ The fix is always the same edit: take the conditions that are hard constraints a
 
 ## Where this goes next
 
-You now know *which* clause a condition belongs in and *why*. What you haven't seen is how the `must` and `should` scores are actually computed — where the number in `_score` comes from when a `match` query ranks one document above another. That's the algorithm behind relevance, called **BM25**, and it's the subject of [Part 5](/learninghub/elasticsearch-05-relevance-and-bm25/). Once you understand how scoring works, the choice between query and filter context stops being a rule of thumb and becomes an obvious consequence.
+You now know *which* clause a condition belongs in and *why*. What you haven't seen is how the `must` and `should` scores are actually computed — where the number in `_score` comes from when a `match` query ranks one document above another. That's the algorithm behind relevance, called **BM25**, and it's the subject of [Part 5](/elasticsearch-05-relevance-and-bm25/). Once you understand how scoring works, the choice between query and filter context stops being a rule of thumb and becomes an obvious consequence.
 
 > If you can look at any condition in a query and say instantly which `bool`
 > clause it belongs in — and whether it should shape the ranking or merely gate

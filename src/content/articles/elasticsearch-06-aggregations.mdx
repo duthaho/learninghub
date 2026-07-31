@@ -13,7 +13,7 @@ part: 6
 
 import Callout from '../../components/Callout.astro';
 
-*Elasticsearch deep-dive · Part 6 of 8. Previous: [Why results come back ranked: BM25](/learninghub/elasticsearch-05-relevance-and-bm25/) · Next: [Running at scale: shards, replicas & the write path](/learninghub/elasticsearch-07-scale-and-the-write-path/).*
+*Elasticsearch deep-dive · Part 6 of 8. Previous: [Why results come back ranked: BM25](/elasticsearch-05-relevance-and-bm25/) · Next: [Running at scale: shards, replicas & the write path](/elasticsearch-07-scale-and-the-write-path/).*
 
 Everything so far has answered one question: **which documents match?** You wrote queries, they filtered and ranked, they handed back a list of hits. Aggregations answer a completely different question — **what can I compute across the documents that matched?** Counts, averages, groupings, histograms, distributions.
 
@@ -141,9 +141,9 @@ Now the concept from earlier in this series comes back to collect its debt. Text
   grouped by word.
 </Callout>
 
-The fix is the rule from [Part 2](/learninghub/elasticsearch-02-documents-and-mappings/): **aggregate and sort on `keyword`, numeric, or date fields — never on analyzed `text`.** Those field types build doc_values and store the value whole, exactly one per document, which is what grouping needs.
+The fix is the rule from [Part 2](/elasticsearch-02-documents-and-mappings/): **aggregate and sort on `keyword`, numeric, or date fields — never on analyzed `text`.** Those field types build doc_values and store the value whole, exactly one per document, which is what grouping needs.
 
-This is the whole reason dynamic mapping gives a string *two* fields. When Elasticsearch first sees a string like a product name, it maps it as `name` (a `text` field, [analyzed](/learninghub/elasticsearch-03-text-analysis/) for search) **and** `name.keyword` (a `keyword` field, stored whole for aggregating and sorting). So to group by product name, you write:
+This is the whole reason dynamic mapping gives a string *two* fields. When Elasticsearch first sees a string like a product name, it maps it as `name` (a `text` field, [analyzed](/elasticsearch-03-text-analysis/) for search) **and** `name.keyword` (a `keyword` field, stored whole for aggregating and sorting). So to group by product name, you write:
 
 ```json
 "terms": { "field": "name.keyword" }
@@ -161,6 +161,6 @@ There's more depth here when you need it, all built on the same nesting idea:
 - **Pipeline aggregations** compute over the *output* of other aggregations — running totals, moving averages, bucket-to-bucket derivatives.
 - **`cardinality`** gives you approximate distinct counts (like `COUNT(DISTINCT)`) cheaply at scale, trading a little accuracy for a lot of memory saved on high-cardinality fields.
 
-But the more pressing question is how any of this runs when your index is spread across many machines. An aggregation like `terms` has to be computed on each shard and then merged into one answer — and that merge step has consequences for accuracy and cost. That's [Part 7](/learninghub/elasticsearch-07-scale-and-the-write-path/): how Elasticsearch runs across shards and replicas, and what the write path looks like underneath.
+But the more pressing question is how any of this runs when your index is spread across many machines. An aggregation like `terms` has to be computed on each shard and then merged into one answer — and that merge step has consequences for accuracy and cost. That's [Part 7](/elasticsearch-07-scale-and-the-write-path/): how Elasticsearch runs across shards and replicas, and what the write path looks like underneath.
 
 > If you can say which field type you'd aggregate on for a product-name breakdown and *why* the `text` version fails — and why you'd set `size: 0` when you only want the numbers — you understand aggregations better than most people copy-pasting dashboard queries.

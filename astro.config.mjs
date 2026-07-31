@@ -3,6 +3,7 @@ import mdx from '@astrojs/mdx';
 import sitemap from '@astrojs/sitemap';
 import rehypeSlug from 'rehype-slug';
 import rehypeAutolinkHeadings from 'rehype-autolink-headings';
+import rehypeBaseLinks from './src/lib/rehype-base-links.mjs';
 
 // Deploy targets are selected by env vars so one repo serves both hosts:
 //   • Cloudflare Pages @ learninghub.duthaho.dev — root path (defaults below)
@@ -27,6 +28,7 @@ export default defineConfig({
     // Clickable # anchor prepended to each heading. rehypeSlug must run first
     // so ids exist before autolink links to them.
     rehypePlugins: [
+      [rehypeBaseLinks, BASE],
       rehypeSlug,
       [
         rehypeAutolinkHeadings,
