@@ -35,8 +35,15 @@ const fmtDate = updated.toLocaleDateString('en-US', {
 
     <div class="layout">
       <div class="main">
-        <Panel title={`${article.id}.md`} mono meta="readonly" padded={false}>
-          <div class="prose">
+        <Panel title={`${article.id}.md`} mono padded={false}>
+          <div slot="head-extra" class="head-actions">
+            <span class="p-meta">readonly</span>
+            <button id="copy-article" class="copy-btn" type="button" aria-label="Copy article content to clipboard">
+              <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
+              <span class="copy-label">Copy</span>
+            </button>
+          </div>
+          <div class="prose" id="article-body">
             <slot />
           </div>
         </Panel>
@@ -98,11 +105,92 @@ const fmtDate = updated.toLocaleDateString('en-US', {
       );
       heads.forEach((h) => obs.observe(h));
     }
+
+    // ---- Copy article content (rich HTML) for pasting into Substack etc. ----
+    const copyBtn = document.getElementById('copy-article');
+    const body = document.getElementById('article-body');
+    if (copyBtn && body) {
+      const label = copyBtn.querySelector('.copy-label');
+
+      const buildHtml = () => {
+        const clone = body.cloneNode(true) as HTMLElement;
+        // Drop heading "#" anchor links
+        clone.querySelectorAll('a.anchor').forEach((a) => a.remove());
+        // Anything explicitly excluded
+        clone.querySelectorAll('[data-no-copy]').forEach((el) => el.remove());
+        // Convert callouts → blockquote with a bold label (Substack-friendly)
+        clone.querySelectorAll('.callout').forEach((c) => {
+          const lbl = c.querySelector('.callout-label')?.textContent?.trim() || 'Note';
+          const inner = c.querySelector('.callout-body')?.innerHTML || '';
+          const bq = document.createElement('blockquote');
+          bq.innerHTML = `<p><strong>${lbl}</strong></p>${inner}`;
+          c.replaceWith(bq);
+        });
+        // Strip classes and data-* attributes for a clean paste
+        clone.querySelectorAll('*').forEach((el) => {
+          el.removeAttribute('class');
+          [...el.attributes].forEach((at) => {
+            if (at.name.startsWith('data-')) el.removeAttribute(at.name);
+          });
+        });
+        return { html: clone.innerHTML, text: clone.textContent?.trim() || '' };
+      };
+
+      const flash = (msg: string) => {
+        if (label) label.textContent = msg;
+        copyBtn.classList.add('copied');
+        setTimeout(() => {
+          if (label) label.textContent = 'Copy';
+          copyBtn.classList.remove('copied');
+        }, 2000);
+      };
+
+      copyBtn.addEventListener('click', async () => {
+        const { html, text } = buildHtml();
+        try {
+          await navigator.clipboard.write([
+            new ClipboardItem({
+              'text/html': new Blob([html], { type: 'text/html' }),
+              'text/plain': new Blob([text], { type: 'text/plain' }),
+            }),
+          ]);
+          flash('Copied!');
+        } catch (e) {
+          try {
+            await navigator.clipboard.writeText(text);
+            flash('Copied text');
+          } catch (e2) {
+            flash('Copy failed');
+          }
+        }
+      });
+    }
   </script>
 
   <style>
     .progress { position: fixed; top: 0; left: 0; right: 0; height: 3px; z-index: 45; }
     .progress span { display: block; height: 100%; width: 0; background: var(--accent); }
+
+    /* Panel-header copy action */
+    .head-actions { display: inline-flex; align-items: center; gap: 0.7rem; }
+    .copy-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.3rem 0.6rem;
+      font-family: var(--sans);
+      font-size: 0.78rem;
+      font-weight: 550;
+      color: var(--ink-soft);
+      background: var(--paper-raised);
+      border: 1px solid var(--line-strong);
+      border-radius: 7px;
+      cursor: pointer;
+      transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+    }
+    .copy-btn svg { fill: none; stroke: currentColor; stroke-width: 1.8; }
+    .copy-btn:hover { color: var(--accent-ink); border-color: var(--accent-line); }
+    .copy-btn.copied { color: #fff; background: var(--accent); border-color: var(--accent-strong); }
 
     .article-head { padding: 2.5rem 0 0; max-width: 46rem; }
     .back { display: inline-block; font-size: 0.88rem; color: var(--ink-faint); margin-bottom: 1.4rem; }
