@@ -1,6 +1,5 @@
 ---
 import BaseLayout from '../layouts/BaseLayout.astro';
-import Newsletter from '../components/Newsletter.astro';
 import { getCollection } from 'astro:content';
 
 const articles = (await getCollection('articles', ({ data }) => !data.draft))
@@ -164,15 +163,10 @@ const folderPath = 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2
         ))}
       </ul>
     </div>
-
-    <div class="nl-band">
-      <Newsletter variant="wide" />
-    </div>
   </section>
 
   <style>
     .hero { padding: clamp(3rem, 8vw, 5.5rem) 0 clamp(2rem, 5vw, 3.5rem); }
-    .nl-band { margin-top: 1.4rem; }
     .hero h1 {
       font-size: clamp(2.3rem, 6.5vw, 4rem);
       margin: 1rem 0 0;
