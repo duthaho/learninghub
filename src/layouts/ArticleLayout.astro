@@ -2,6 +2,7 @@
 import BaseLayout from './BaseLayout.astro';
 import Panel from '../components/Panel.astro';
 import Support from '../components/Support.astro';
+import Newsletter from '../components/Newsletter.astro';
 import SeriesNav from '../components/SeriesNav.astro';
 import type { CollectionEntry } from 'astro:content';
 import type { MarkdownHeading } from 'astro';
@@ -72,6 +73,7 @@ const fmtDate = updated.toLocaleDateString('en-US', {
           </Panel>
         )}
 
+        <Newsletter variant="card" />
         <Support variant="card" />
       </aside>
     </div>

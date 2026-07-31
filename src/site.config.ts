@@ -19,3 +19,16 @@ export const support = {
 };
 
 export const supportUrl = `https://www.buymeacoffee.com/${support.handle}`;
+
+export const newsletter = {
+  /** Turn the subscribe panels on/off. */
+  enabled: true,
+  /** Your Substack publication base URL (no trailing slash). */
+  url: 'https://duthaho.substack.com',
+  title: 'Get new deep-dives by email',
+  blurb: 'One backend system at a time, explained properly. New parts land on my Substack — no spam, unsubscribe anytime.',
+  cta: 'Subscribe',
+};
+
+/** Substack subscribe page; pass ?email= to prefill. */
+export const subscribeUrl = `${newsletter.url}/subscribe`;
