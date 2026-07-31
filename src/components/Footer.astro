@@ -7,81 +7,51 @@ const year = new Date().getFullYear();
 ---
 
 <footer class="colophon">
-  <hr class="rule-double" />
+  <hr class="rule" />
   <div class="wrap inner">
-    <div class="mark">
-      <span class="logo">learning<span>hub</span></span>
-      <p class="note">
-        A map of backend systems, written from real study notes — one station at
-        a time. Set in Space&nbsp;Grotesk &amp; Source&nbsp;Serif&nbsp;4.
-      </p>
-    </div>
-
+    <span class="logo">learning<span>hub</span></span>
     <nav class="links" aria-label="Footer">
-      <span class="lbl">Map</span>
-      <a href={`${base}#map`}>All systems</a>
+      <a href={`${base}#map`}>Map</a>
       <a href={`${base}about/`}>About</a>
       <a href="https://github.com/duthaho/learninghub" target="_blank" rel="noopener noreferrer">GitHub</a>
       {support.enabled && showSupport && (
-        <a href={supportUrl} target="_blank" rel="noopener noreferrer">Buy me a coffee</a>
+        <a href={supportUrl} target="_blank" rel="noopener noreferrer">Coffee</a>
       )}
     </nav>
-  </div>
-  <div class="wrap base">
-    <span>© {year} learninghub</span>
-    <span>duthaho · learning in public</span>
+    <span class="copy">© {year} · duthaho</span>
   </div>
 </footer>
 
 <style>
-  .colophon { margin-top: 5rem; }
-  .rule-double { margin: 0; }
+  .colophon { margin-top: 3.5rem; }
+  .rule { margin: 0; }
   .inner {
-    display: grid;
-    grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
-    gap: 1.5rem 3rem;
-    padding: 2rem 0 1.4rem;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.6rem 1.4rem;
+    padding: 1.1rem 0;
   }
   .logo {
     font-family: var(--font-display);
     font-weight: 600;
-    font-size: 1.25rem;
+    font-size: 1.05rem;
     letter-spacing: -0.02em;
     color: var(--ink);
   }
   .logo span { color: var(--accent); }
-  .note {
-    margin: 0.5rem 0 0;
-    max-width: 32ch;
-    font-size: 0.92rem;
-    line-height: 1.55;
-    color: var(--ink-soft);
-  }
 
-  .links { display: flex; flex-direction: column; gap: 0.55rem; align-items: start; }
-  .lbl {
-    font-family: var(--font-mono);
-    font-size: 0.64rem;
-    letter-spacing: 0.14em;
-    text-transform: uppercase;
-    color: var(--ink-faint);
-    margin-bottom: 0.15rem;
-  }
+  .links { display: flex; flex-wrap: wrap; gap: 1.1rem; }
   .links a {
     color: var(--ink-soft);
-    font-size: 0.95rem;
+    font-size: 0.9rem;
     border-bottom: 1px solid transparent;
     transition: color 0.15s var(--ease-out), border-color 0.15s var(--ease-out);
   }
   .links a:hover { color: var(--accent-ink); border-bottom-color: var(--accent); }
 
-  .base {
-    display: flex;
-    justify-content: space-between;
-    gap: 1rem;
-    flex-wrap: wrap;
-    padding: 0.9rem 0 1.6rem;
-    border-top: 1px solid var(--line);
+  .copy {
+    margin-left: auto;
     font-family: var(--font-mono);
     font-size: 0.68rem;
     letter-spacing: 0.06em;
@@ -89,6 +59,6 @@ const year = new Date().getFullYear();
   }
 
   @media (max-width: 40rem) {
-    .inner { grid-template-columns: 1fr; gap: 1.5rem; }
+    .copy { margin-left: 0; flex-basis: 100%; }
   }
 </style>
