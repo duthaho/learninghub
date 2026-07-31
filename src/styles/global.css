@@ -1,32 +1,33 @@
-/* Hallmark · genre: editorial · macrostructure: Index-First / Long Document / Letter
- * theme: custom (editorial almanac · paper oklch(97% .008 78) · accent oxblood oklch(45% .13 25) warm · Fraunces + Source Serif 4)
- * design-system: design.md · designed-as-app · nav: N6 masthead · footer: Ft4 colophon
+/* Hallmark · genre: editorial→technical · macrostructure: Map/Diagram (home) · Long Document (articles) · Letter (about)
+ * theme: custom (schematic · plot-paper/slate · signal-blue accent · Space Grotesk + Source Serif 4 + JetBrains Mono)
+ * design-system: design.md · designed-as-app · nav: N6 masthead · footer: Ft4 legend
  * ------------------------------------------------------------------
- *  learninghub — an editorial almanac. Warm ivory paper, ink-black type,
- *  one oxblood accent, hairline rules. Fraunces display, Source Serif 4
- *  reading body, JetBrains Mono for labels & code. Light + dark.
+ *  learninghub — a systems map. Backend systems are read as a schematic:
+ *  a signal-blue trunk line of stations on cool plot-paper. Space Grotesk
+ *  for the diagram + chrome, Source Serif 4 for long-form reading, JetBrains
+ *  Mono for coordinates & code. Light + dark (control-room).
  * ------------------------------------------------------------------ */
 
-@import '@fontsource-variable/fraunces';
+@import '@fontsource-variable/space-grotesk';
 @import '@fontsource-variable/source-serif-4';
 @import '@fontsource/jetbrains-mono/400.css';
 @import '@fontsource/jetbrains-mono/500.css';
 
 :root {
   /* ---- Named tokens (portable · mirror of tokens.css) ---- */
-  --color-paper:     oklch(97.2% 0.008 78);
-  --color-paper-2:   oklch(94.6% 0.010 78);
-  --color-paper-3:   oklch(92.0% 0.012 76);
-  --color-ink:       oklch(23% 0.014 48);
-  --color-ink-2:     oklch(43% 0.016 50);
-  --color-ink-faint: oklch(51% 0.014 55);
-  --color-rule:      oklch(86% 0.012 72);
-  --color-rule-2:    oklch(79% 0.014 70);
-  --color-accent:    oklch(45% 0.132 25);
-  --color-accent-2:  oklch(38% 0.120 24);
-  --color-focus:     oklch(52% 0.160 25);
+  --color-paper:     oklch(96.5% 0.006 240);
+  --color-paper-2:   oklch(93.5% 0.008 240);
+  --color-paper-3:   oklch(90.5% 0.010 240);
+  --color-ink:       oklch(25% 0.022 255);
+  --color-ink-2:     oklch(45% 0.022 250);
+  --color-ink-faint: oklch(55% 0.020 245);
+  --color-rule:      oklch(88% 0.012 240);
+  --color-rule-2:    oklch(81% 0.016 240);
+  --color-accent:    oklch(53% 0.160 245);
+  --color-accent-2:  oklch(46% 0.150 248);
+  --color-focus:     oklch(56% 0.160 245);
 
-  --font-display: 'Fraunces Variable', 'Fraunces', ui-serif, Georgia, 'Times New Roman', serif;
+  --font-display: 'Space Grotesk Variable', 'Space Grotesk', system-ui, sans-serif;
   --font-body:    'Source Serif 4 Variable', 'Source Serif 4', ui-serif, Georgia, serif;
   --font-mono:    'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
 
@@ -36,6 +37,9 @@
 
   --ease-out:    cubic-bezier(0.16, 1, 0.3, 1);
   --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+
+  /* grid / plot-paper line (schematic surface) */
+  --grid-line: color-mix(in oklch, var(--color-rule) 60%, transparent);
 
   /* ---- Legacy aliases (components read these · same values) ---- */
   --paper: var(--color-paper);
@@ -50,10 +54,10 @@
   --accent: var(--color-accent);
   --accent-strong: var(--color-accent-2);
   --accent-ink: var(--color-accent);
-  --accent-wash: color-mix(in oklch, var(--color-accent) 8%, var(--color-paper-2));
-  --accent-line: color-mix(in oklch, var(--color-accent) 34%, var(--color-rule));
+  --accent-wash: color-mix(in oklch, var(--color-accent) 9%, var(--color-paper-2));
+  --accent-line: color-mix(in oklch, var(--color-accent) 36%, var(--color-rule));
 
-  --sans: var(--font-body);   /* UI + prose now share the reading serif */
+  --sans: var(--font-body);
   --mono: var(--font-mono);
   --display: var(--font-display);
   --serif: var(--font-body);
@@ -66,20 +70,21 @@
 }
 
 :root[data-theme='dark'] {
-  --color-paper:     oklch(19% 0.010 48);
-  --color-paper-2:   oklch(23% 0.012 48);
-  --color-paper-3:   oklch(27% 0.013 48);
-  --color-ink:       oklch(92% 0.012 82);
-  --color-ink-2:     oklch(74% 0.012 70);
-  --color-ink-faint: oklch(58% 0.012 60);
-  --color-rule:      oklch(33% 0.013 50);
-  --color-rule-2:    oklch(42% 0.014 50);
-  --color-accent:    oklch(68% 0.140 30);
-  --color-accent-2:  oklch(76% 0.130 33);
-  --color-focus:     oklch(70% 0.150 30);
+  --color-paper:     oklch(21% 0.022 255);
+  --color-paper-2:   oklch(25% 0.024 255);
+  --color-paper-3:   oklch(29% 0.026 255);
+  --color-ink:       oklch(92% 0.012 240);
+  --color-ink-2:     oklch(74% 0.016 240);
+  --color-ink-faint: oklch(60% 0.018 245);
+  --color-rule:      oklch(35% 0.022 250);
+  --color-rule-2:    oklch(45% 0.024 250);
+  --color-accent:    oklch(74% 0.150 220);
+  --color-accent-2:  oklch(82% 0.130 215);
+  --color-focus:     oklch(74% 0.150 220);
 
-  --accent-wash: color-mix(in oklch, var(--color-accent) 15%, var(--color-paper-2));
-  --accent-line: color-mix(in oklch, var(--color-accent) 40%, var(--color-rule));
+  --accent-wash: color-mix(in oklch, var(--color-accent) 16%, var(--color-paper-2));
+  --accent-line: color-mix(in oklch, var(--color-accent) 42%, var(--color-rule));
+  --grid-line: color-mix(in oklch, var(--color-rule) 70%, transparent);
 
   color-scheme: dark;
 }
@@ -110,23 +115,30 @@ body {
 }
 :root[data-theme='dark'] body { font-weight: 350; }
 
-::selection { background: color-mix(in oklch, var(--accent) 22%, transparent); }
+::selection { background: color-mix(in oklch, var(--accent) 24%, transparent); }
+
+/* Plot-paper grid surface — the schematic signature. Apply to a canvas. */
+.plot {
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 2rem 2rem;
+  background-position: -1px -1px;
+}
 
 /* ---- Typography ---- */
 h1, h2, h3, h4 {
   font-family: var(--font-display);
-  font-weight: 580;
+  font-weight: 600;
   font-style: normal;
-  font-variation-settings: 'opsz' 144, 'SOFT' 0, 'WONK' 0;
-  line-height: 1.12;
+  line-height: 1.1;
   letter-spacing: -0.02em;
   color: var(--ink);
   text-wrap: balance;
 }
-h1 { font-weight: 600; }
 p { text-wrap: pretty; }
 em { font-style: italic; }
-strong { font-weight: 640; color: var(--ink); }
+strong { font-weight: 650; color: var(--ink); }
 
 a {
   color: var(--accent);
@@ -134,7 +146,6 @@ a {
 }
 a:hover { color: var(--accent-strong); }
 
-/* Inline prose links get a drawn underline that thickens on hover */
 .prose a,
 .about a,
 .lede a {
@@ -142,7 +153,7 @@ a:hover { color: var(--accent-strong); }
   text-decoration-color: color-mix(in oklch, var(--accent) 45%, transparent);
   text-underline-offset: 0.18em;
   text-decoration-thickness: 1px;
-  transition: text-decoration-color var(--dur, 0.15s) ease;
+  transition: text-decoration-color 0.15s var(--ease-out);
 }
 .prose a:hover,
 .about a:hover,
@@ -160,122 +171,79 @@ code { font-family: var(--font-mono); font-size: 0.86em; }
 /* ---- Layout ---- */
 .wrap { width: min(72rem, 100% - 2 * var(--gap)); margin-inline: auto; }
 
-/* Small-caps / mono field label — the almanac's eyebrow. Always stacked
-   ABOVE its heading (never tag-left / heading-right). */
+/* Mono coordinate / field label — the schematic's eyebrow. Stacked ABOVE
+   its heading (never tag-left / heading-right). */
 .eyebrow {
   font-family: var(--font-mono);
   font-size: 0.72rem;
   font-weight: 500;
-  letter-spacing: 0.16em;
+  letter-spacing: 0.18em;
   text-transform: uppercase;
   color: var(--color-accent);
   margin: 0;
 }
 
-/* Hairline ornament rule (replaces boxed dividers) */
-.rule {
-  border: 0;
-  border-top: 1px solid var(--line);
-  margin: 0;
-}
-.rule-double {
-  border: 0;
-  border-top: 3px double var(--line-strong);
-}
+.rule { border: 0; border-top: 1px solid var(--line); margin: 0; }
+.rule-double { border: 0; border-top: 3px double var(--line-strong); }
 
-/* ---- Panels — de-boxed: a labelled block ruled by hairlines, no window
-   header strip, no fake file chrome. ---- */
-.panel {
-  background: transparent;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-}
+/* ---- Panels (retained for compatibility; hairline, no window chrome) ---- */
+.panel { background: transparent; border: 1px solid var(--line); border-radius: var(--radius); }
 .panel-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 1rem;
-  padding: 0.7rem 1.1rem 0.6rem;
-  border-bottom: 1px solid var(--line);
+  display: flex; align-items: baseline; justify-content: space-between; gap: 1rem;
+  padding: 0.7rem 1.1rem 0.6rem; border-bottom: 1px solid var(--line);
 }
 .panel-head .p-title {
-  font-family: var(--font-mono);
-  font-size: 0.68rem;
-  font-weight: 500;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--ink-soft);
-  display: inline-flex;
-  align-items: center;
-  gap: 0.5rem;
+  font-family: var(--font-mono); font-size: 0.68rem; font-weight: 500;
+  letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-soft);
+  display: inline-flex; align-items: center; gap: 0.5rem;
 }
 .panel-head .p-title.mono { color: var(--accent); }
 .panel-head .p-meta {
-  font-family: var(--font-mono);
-  font-size: 0.68rem;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--ink-faint);
+  font-family: var(--font-mono); font-size: 0.68rem; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--ink-faint);
 }
 .panel-body { padding: 1.1rem 1.15rem; }
 
 /* ---- Buttons ---- */
 .btn, .btn-dark, .btn-ghost {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.5em;
-  font-family: var(--font-body);
-  font-weight: 560;
-  font-size: 0.96rem;
+  display: inline-flex; align-items: center; justify-content: center; gap: 0.5em;
+  font-family: var(--font-display);
+  font-weight: 550;
+  font-size: 0.92rem;
+  letter-spacing: 0.01em;
   line-height: 1;
-  padding: 0.66em 1.15em;
+  padding: 0.68em 1.15em;
   border-radius: var(--radius-sm);
   border: 1px solid transparent;
-  cursor: pointer;
-  text-decoration: none;
+  cursor: pointer; text-decoration: none;
   transition: background 0.15s var(--ease-out), transform 0.15s var(--ease-out),
               border-color 0.15s var(--ease-out), color 0.15s var(--ease-out);
 }
 .btn { background: var(--accent); color: var(--color-paper); border-color: var(--accent); }
-:root[data-theme='dark'] .btn { color: oklch(20% 0.02 40); }
+:root[data-theme='dark'] .btn { color: oklch(20% 0.02 250); }
 .btn:hover { background: var(--accent-strong); border-color: var(--accent-strong); transform: translateY(-1px); }
 .btn-dark { background: var(--ink); color: var(--paper); border-color: var(--ink); }
 .btn-dark:hover { transform: translateY(-1px); opacity: 0.9; color: var(--paper); }
 .btn-ghost { background: transparent; color: var(--ink); border-color: var(--line-strong); }
 .btn-ghost:hover { border-color: var(--accent); color: var(--accent-ink); }
 
-/* ---- Definition-list metadata (replaces boxed coral table) ---- */
+/* ---- Definition-list metadata ---- */
 .meta-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
 .meta-table tr { border-bottom: 1px solid var(--line); }
 .meta-table tr:last-child { border-bottom: none; }
 .meta-table th {
-  text-align: left;
-  vertical-align: top;
-  width: 6.5rem;
-  padding: 0.6rem 0.9rem 0.6rem 0;
-  color: var(--accent);
-  font-family: var(--font-mono);
-  font-weight: 500;
-  font-size: 0.68rem;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
+  text-align: left; vertical-align: top; width: 6.5rem; padding: 0.6rem 0.9rem 0.6rem 0;
+  color: var(--accent); font-family: var(--font-mono); font-weight: 500;
+  font-size: 0.68rem; letter-spacing: 0.1em; text-transform: uppercase;
 }
 .meta-table td { padding: 0.6rem 0; color: var(--ink-soft); }
 
-/* ---- Tag / chip — flat, hairline, no fill ---- */
+/* ---- Tag / chip ---- */
 .tag {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4em;
-  font-family: var(--font-mono);
-  font-size: 0.66rem;
-  font-weight: 500;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--accent-ink);
-  padding: 0.16em 0;
-  border-bottom: 1px solid var(--accent-line);
+  display: inline-flex; align-items: center; gap: 0.4em;
+  font-family: var(--font-mono); font-size: 0.66rem; font-weight: 500;
+  letter-spacing: 0.1em; text-transform: uppercase; color: var(--accent-ink);
+  padding: 0.16em 0; border-bottom: 1px solid var(--accent-line);
 }
 
 :focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; border-radius: 2px; }

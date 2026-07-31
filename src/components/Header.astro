@@ -8,12 +8,15 @@ const onAbout = path.startsWith(`${base}about`);
 <header class="masthead">
   <div class="wrap bar">
     <a class="brand" href={base} aria-label="learninghub home">
-      <span class="logo">learning<span class="logo-accent">hub</span></span>
-      <span class="tagline">a field journal of backend systems</span>
+      <span class="mark">
+        <span class="node-dot" aria-hidden="true"></span>
+        <span class="logo">learning<span class="logo-accent">hub</span></span>
+      </span>
+      <span class="tagline">a map of backend systems</span>
     </a>
 
     <nav class="nav" aria-label="Primary">
-      <a class="lnk" href={`${base}#topics`}>Topics</a>
+      <a class="lnk" href={`${base}#map`}>Map</a>
       <a class="lnk" class:list={[{ active: onAbout }]} href={`${base}about/`}>About</a>
       <a class="lnk" href={repo} target="_blank" rel="noopener noreferrer">GitHub</a>
       <button id="theme-toggle" class="toggle" type="button" aria-label="Toggle colour theme" title="Toggle light / dark">
@@ -44,11 +47,18 @@ const onAbout = path.startsWith(`${base}about`);
   }
   .bar { display: flex; align-items: center; justify-content: space-between; min-height: 4rem; gap: 1rem; padding: 0.5rem 0; }
 
-  .brand { text-decoration: none; display: flex; flex-direction: column; gap: 0.05rem; line-height: 1.05; }
+  .brand { text-decoration: none; display: flex; flex-direction: column; gap: 0.1rem; line-height: 1.05; }
+  .mark { display: inline-flex; align-items: center; gap: 0.5rem; }
+  .node-dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-wash);
+    flex: 0 0 auto;
+  }
   .logo {
     font-family: var(--font-display);
     font-weight: 600;
-    font-size: 1.4rem;
+    font-size: 1.35rem;
     letter-spacing: -0.02em;
     color: var(--ink);
   }

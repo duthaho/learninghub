@@ -1,26 +1,27 @@
 /* ------------------------------------------------------------------ *
  *  learninghub — design tokens (portable)
- *  Editorial almanac · oxblood on warm ivory · Fraunces + Source Serif 4.
+ *  Schematic · signal-blue on cool plot-paper/slate ·
+ *  Space Grotesk + Source Serif 4 + JetBrains Mono.
  *  Mirrors src/styles/global.css. Import wherever the system is reused.
  * ------------------------------------------------------------------ */
 
 :root {
   /* ---- Colour · light ---- */
-  --color-paper:     oklch(97.2% 0.008 78);
-  --color-paper-2:   oklch(94.6% 0.010 78);
-  --color-paper-3:   oklch(92.0% 0.012 76);
-  --color-ink:       oklch(23% 0.014 48);
-  --color-ink-2:     oklch(43% 0.016 50);
-  --color-ink-faint: oklch(51% 0.014 55);
-  --color-rule:      oklch(86% 0.012 72);
-  --color-rule-2:    oklch(79% 0.014 70);
-  --color-accent:    oklch(45% 0.132 25);
-  --color-accent-2:  oklch(38% 0.120 24);
-  --color-accent-wash: color-mix(in oklch, var(--color-accent) 8%, var(--color-paper-2));
-  --color-focus:     oklch(52% 0.160 25);
+  --color-paper:     oklch(96.5% 0.006 240);
+  --color-paper-2:   oklch(93.5% 0.008 240);
+  --color-paper-3:   oklch(90.5% 0.010 240);
+  --color-ink:       oklch(25% 0.022 255);
+  --color-ink-2:     oklch(45% 0.022 250);
+  --color-ink-faint: oklch(55% 0.020 245);
+  --color-rule:      oklch(88% 0.012 240);
+  --color-rule-2:    oklch(81% 0.016 240);
+  --color-accent:    oklch(53% 0.160 245);
+  --color-accent-2:  oklch(46% 0.150 248);
+  --color-accent-wash: color-mix(in oklch, var(--color-accent) 9%, var(--color-paper-2));
+  --color-focus:     oklch(56% 0.160 245);
 
   /* ---- Type ---- */
-  --font-display: 'Fraunces Variable', 'Fraunces', ui-serif, Georgia, 'Times New Roman', serif;
+  --font-display: 'Space Grotesk Variable', 'Space Grotesk', system-ui, sans-serif;
   --font-body:    'Source Serif 4 Variable', 'Source Serif 4', ui-serif, Georgia, serif;
   --font-mono:    'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
 
@@ -56,16 +57,16 @@
 }
 
 :root[data-theme='dark'] {
-  --color-paper:     oklch(19% 0.010 48);
-  --color-paper-2:   oklch(23% 0.012 48);
-  --color-paper-3:   oklch(27% 0.013 48);
-  --color-ink:       oklch(92% 0.012 82);
-  --color-ink-2:     oklch(74% 0.012 70);
-  --color-ink-faint: oklch(58% 0.012 60);
-  --color-rule:      oklch(33% 0.013 50);
-  --color-rule-2:    oklch(42% 0.014 50);
-  --color-accent:    oklch(68% 0.140 30);
-  --color-accent-2:  oklch(76% 0.130 33);
+  --color-paper:     oklch(21% 0.022 255);
+  --color-paper-2:   oklch(25% 0.024 255);
+  --color-paper-3:   oklch(29% 0.026 255);
+  --color-ink:       oklch(92% 0.012 240);
+  --color-ink-2:     oklch(74% 0.016 240);
+  --color-ink-faint: oklch(60% 0.018 245);
+  --color-rule:      oklch(35% 0.022 250);
+  --color-rule-2:    oklch(45% 0.024 250);
+  --color-accent:    oklch(74% 0.150 220);
+  --color-accent-2:  oklch(82% 0.130 215);
   --color-accent-wash: color-mix(in oklch, var(--color-accent) 16%, var(--color-paper-2));
-  --color-focus:     oklch(70% 0.150 30);
+  --color-focus:     oklch(74% 0.150 220);
 }

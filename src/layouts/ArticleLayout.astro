@@ -26,7 +26,8 @@ const fmtDate = updated.toLocaleDateString('en-US', {
 
   <article class="wrap">
     <header class="article-head">
-      <a class="back" href={`${base}#topics`}>← Back to the index</a>
+      <a class="back" href={`${base}#map`}>◀ Back to the map</a>
+      <p class="coord">{article.data.series ? `${article.data.series} line` : 'Deep-dive'}</p>
       <h1>{title}</h1>
       <p class="subtitle">{subtitle}</p>
       <div class="byline">
@@ -174,6 +175,15 @@ const fmtDate = updated.toLocaleDateString('en-US', {
       margin-bottom: 1.6rem;
     }
     .back:hover { color: var(--accent-ink); }
+    .coord {
+      margin: 0 0 0.5rem;
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      font-weight: 500;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: var(--accent);
+    }
     .article-head h1 { font-size: clamp(2.1rem, 5vw, 3.2rem); line-height: 1.08; margin: 0; }
     .subtitle {
       font-size: clamp(1.1rem, 2.4vw, 1.4rem);
@@ -270,7 +280,7 @@ const fmtDate = updated.toLocaleDateString('en-US', {
     .prose :global(> p:first-of-type)::first-letter {
       initial-letter: 2;
       -webkit-initial-letter: 2;
-      font-family: var(--font-display);
+      font-family: var(--font-body);
       font-weight: 600;
       color: var(--accent);
       margin-right: 0.6rem;
@@ -281,6 +291,16 @@ const fmtDate = updated.toLocaleDateString('en-US', {
       padding-top: 1.8rem;
       border-top: 1px solid var(--line);
       scroll-margin-top: 6rem;
+    }
+    /* station-dot marker where each section rule begins — echoes the map */
+    .prose :global(h2)::before {
+      content: '';
+      position: absolute;
+      top: -5px; left: 0;
+      width: 9px; height: 9px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 0 4px var(--paper);
     }
     .prose :global(h3) { font-size: 1.3rem; margin: 2rem 0 0.4rem; scroll-margin-top: 6rem; }
     .prose :global(h2), .prose :global(h3) { position: relative; }

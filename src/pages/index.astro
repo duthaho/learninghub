@@ -6,9 +6,9 @@ const articles = (await getCollection('articles', ({ data }) => !data.draft))
   .sort((a, b) => a.data.order - b.data.order);
 const base = import.meta.env.BASE_URL;
 
-// Collapse multi-part series (frontmatter `series`) into a single entry;
-// standalone articles stay as their own row. `part: 0` is the series cover
-// (the start-here guide), everything else is a numbered chapter.
+// Collapse multi-part series (frontmatter `series`) into one station; standalone
+// articles are their own station. `part: 0` is the series cover (start-here
+// guide), everything else is a numbered chapter.
 const bySeries = new Map();
 const standalone = [];
 for (const a of articles) {
@@ -38,92 +38,84 @@ for (const [name, parts] of bySeries) {
 entries.sort((a, b) => a.order - b.order);
 
 const upcoming = [
-  { id: 'mysql', title: 'MySQL', subtitle: 'Indexes, transactions & the query planner' },
+  { id: 'mysql', name: 'MySQL', subtitle: 'Indexes, transactions & the query planner' },
 ];
 
-const num = (n) => String(n + 1).padStart(2, '0');
+const stations = [
+  ...entries.map((e) =>
+    e.kind === 'article'
+      ? { state: 'live', name: e.article.data.title, sub: e.article.data.subtitle,
+          href: `${base}${e.article.id}/`, rt: e.article.data.readingTime, kind: 'deep-dive' }
+      : { state: 'series', name: e.name, sub: e.cover.data.subtitle, slug: e.slug,
+          cover: e.cover, chapters: e.chapters, count: e.count, kind: `${e.count}-part series` }
+  ),
+  ...upcoming.map((u) => ({ state: 'planned', name: u.name, sub: u.subtitle, kind: 'planned' })),
+];
+
+const nodeId = (i) => 'N' + String(i + 1).padStart(2, '0');
+const partId = (n) => (n === 0 ? '★' : String(n).padStart(2, '0'));
 ---
 
 <BaseLayout
-  title="learninghub — backend systems, understood not memorised"
-  description="In-depth deep-dives on the backend systems every engineer leans on — Redis, MySQL, Elasticsearch and more. Written in public from real study notes."
+  title="learninghub — a map of the backend systems you actually use"
+  description="Deep-dives on the backend systems every engineer leans on — Redis, MySQL, Elasticsearch and more — laid out as a map. Written in public from real study notes."
 >
-  <section class="hero wrap">
-    <p class="eyebrow">Deep-dives on the systems you actually use</p>
-    <h1>Backend systems,<br />understood — <span class="accent">not memorised.</span></h1>
+  <section class="map-intro wrap">
+    <p class="eyebrow">Node map · backend systems</p>
+    <h1>Read the systems<br />as a <span class="accent">map</span> — not a list.</h1>
     <p class="lede">
-      I learn one system at a time, to the point where I can make design
-      decisions and read other people's code. These are those notes, rewritten
-      as structured deep-dives — mental models first, gotchas included.
+      I learn one system at a time, down to where I can make design decisions and
+      read other people's code. Each one becomes a station on this line — mental
+      model first, gotchas included. Follow the track.
     </p>
     <div class="cta">
-      <a class="btn" href="#topics">Browse the index</a>
+      <a class="btn" href="#map">Open the map</a>
       <a class="btn-ghost" href={`${base}about/`}>How this works</a>
     </div>
-    <p class="marks">
-      Mental model first
-      <span aria-hidden="true">·</span> Taught to a rubric
-      <span aria-hidden="true">·</span> Real gotchas, not trivia
-    </p>
   </section>
 
-  <section id="topics" class="topics wrap">
-    <div class="contents-head">
-      <h2>The index</h2>
-      <span class="count">{entries.length} topics · {articles.length} articles · {upcoming.length} in progress</span>
+  <section id="map" class="map wrap">
+    <div class="legend">
+      <span class="key"><i class="dot dot-live" aria-hidden="true"></i> deep-dive</span>
+      <span class="key"><i class="dot dot-series" aria-hidden="true"></i> series</span>
+      <span class="key"><i class="dot dot-planned" aria-hidden="true"></i> planned</span>
+      <span class="legend-meta">{stations.length} nodes · {articles.length} articles</span>
     </div>
 
-    <ol class="contents" role="list">
-      {entries.map((e, i) => (
-        e.kind === 'article' ? (
-          <li class="entry">
-            <a href={`${base}${e.article.id}/`}>
-              <span class="idx" aria-hidden="true">{num(i)}</span>
-              <span class="body">
-                <span class="title">{e.article.data.title}</span>
-                <span class="sub">{e.article.data.subtitle}</span>
-              </span>
-              <span class="end">
-                <span class="kind">deep-dive</span>
-                <span class="rt">{e.article.data.readingTime}</span>
-                <span class="go" aria-hidden="true">→</span>
-              </span>
-            </a>
-          </li>
-        ) : (
-          <li class="entry entry-series">
+    <ol class="line plot" role="list">
+      {stations.map((s, i) => (
+        s.state === 'series' ? (
+          <li class={`station station-series`}>
             <details class="series">
-              <summary>
-                <span class="idx" aria-hidden="true">{num(i)}</span>
-                <span class="body">
-                  <span class="title">{e.name}
-                    <span class="badge">{e.count}-part series</span>
-                  </span>
-                  <span class="sub">{e.cover.data.subtitle}</span>
+              <summary class="station-row">
+                <span class="node"><span class="dot dot-series" aria-hidden="true"></span></span>
+                <span class="station-body">
+                  <span class="station-coord">{nodeId(i)} · {s.kind}</span>
+                  <span class="station-title">{s.name}</span>
+                  <span class="station-sub">{s.sub}</span>
                 </span>
-                <span class="end">
-                  <span class="kind">series</span>
-                  <span class="rt browse">Contents</span>
+                <span class="station-end">
+                  <span class="station-open">Trace line</span>
                   <span class="chev" aria-hidden="true">
                     <svg viewBox="0 0 24 24" width="15" height="15"><path d="M9 6l6 6-6 6"/></svg>
                   </span>
                 </span>
               </summary>
-              <ol class="parts" role="list">
-                <li class="part part-cover">
-                  <a href={`${base}${e.cover.id}/`}>
-                    <span class="pnum" aria-hidden="true">✦</span>
-                    <span class="ptitle">Start here — series guide</span>
-                    <span class="rt">{e.cover.data.readingTime}</span>
+              <ol class="branch" role="list">
+                <li class="stop stop-cover">
+                  <a href={`${base}${s.cover.id}/`}>
+                    <span class="stop-node"><span class="stop-dot" aria-hidden="true">★</span></span>
+                    <span class="stop-title">Start here — series guide</span>
+                    <span class="stop-rt">{s.cover.data.readingTime}</span>
                     <span class="go" aria-hidden="true">→</span>
                   </a>
                 </li>
-                {e.chapters.map((c) => (
-                  <li class="part">
+                {s.chapters.map((c) => (
+                  <li class="stop">
                     <a href={`${base}${c.id}/`}>
-                      <span class="pnum">{String(c.data.part).padStart(2, '0')}</span>
-                      <span class="ptitle">{c.data.title}</span>
-                      <span class="rt">{c.data.readingTime}</span>
+                      <span class="stop-node"><span class="stop-dot" aria-hidden="true">{partId(c.data.part)}</span></span>
+                      <span class="stop-title">{c.data.title}</span>
+                      <span class="stop-rt">{c.data.readingTime}</span>
                       <span class="go" aria-hidden="true">→</span>
                     </a>
                   </li>
@@ -131,191 +123,241 @@ const num = (n) => String(n + 1).padStart(2, '0');
               </ol>
             </details>
           </li>
+        ) : s.state === 'live' ? (
+          <li class="station station-live">
+            <a class="station-row" href={s.href}>
+              <span class="node"><span class="dot dot-live" aria-hidden="true"></span></span>
+              <span class="station-body">
+                <span class="station-coord">{nodeId(i)} · {s.kind}</span>
+                <span class="station-title">{s.name}</span>
+                <span class="station-sub">{s.sub}</span>
+              </span>
+              <span class="station-end">
+                <span class="station-rt">{s.rt}</span>
+                <span class="go" aria-hidden="true">→</span>
+              </span>
+            </a>
+          </li>
+        ) : (
+          <li class="station station-planned">
+            <div class="station-row">
+              <span class="node"><span class="dot dot-planned" aria-hidden="true"></span></span>
+              <span class="station-body">
+                <span class="station-coord">{nodeId(i)} · in progress</span>
+                <span class="station-title">{s.name}</span>
+                <span class="station-sub">{s.sub}</span>
+              </span>
+              <span class="station-end">
+                <span class="station-rt">queued</span>
+              </span>
+            </div>
+          </li>
         )
-      ))}
-      {upcoming.map((u, i) => (
-        <li class="entry entry-soon">
-          <span class="idx" aria-hidden="true">{num(entries.length + i)}</span>
-          <span class="body">
-            <span class="title">{u.title} <span class="badge badge-soon">In progress</span></span>
-            <span class="sub">{u.subtitle}</span>
-          </span>
-          <span class="end"><span class="rt">queued</span></span>
-        </li>
       ))}
     </ol>
   </section>
 
   <style>
-    .hero { padding: clamp(3.5rem, 9vw, 6rem) 0 clamp(2.5rem, 6vw, 4rem); }
-    .hero h1 {
+    .map-intro { padding: clamp(3.5rem, 9vw, 6rem) 0 clamp(2rem, 5vw, 3rem); }
+    .map-intro h1 {
       font-size: var(--text-display, clamp(2.6rem, 5.2vw + 1rem, 4.6rem));
-      line-height: 1.06;
+      line-height: 1.04;
       margin: 1rem 0 0;
-      max-width: 16ch;
+      max-width: 15ch;
     }
-    .hero h1 .accent { color: var(--accent); }
+    .map-intro h1 .accent { color: var(--accent); }
     .lede {
       max-width: 42rem;
-      font-size: clamp(1.1rem, 2.2vw, 1.3rem);
+      font-size: clamp(1.1rem, 2.2vw, 1.28rem);
       line-height: 1.62;
       color: var(--ink-soft);
       margin: 1.5rem 0 2rem;
     }
     .cta { display: flex; gap: 0.8rem; flex-wrap: wrap; }
-    .marks {
-      margin: 2.4rem 0 0;
-      font-family: var(--font-mono);
-      font-size: 0.72rem;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-      color: var(--ink-faint);
-    }
-    .marks span { color: var(--accent); margin: 0 0.5rem; }
 
-    /* ---- The index / table of contents ---- */
-    .topics { margin-bottom: 2rem; }
-    .contents-head {
+    /* ---- The map ---- */
+    .map { margin-bottom: 3rem; }
+    .legend {
       display: flex;
-      align-items: baseline;
-      justify-content: space-between;
-      gap: 1rem;
-      padding-bottom: 0.6rem;
-      border-bottom: 3px double var(--line-strong);
-    }
-    .contents-head h2 { font-size: 1.5rem; margin: 0; }
-    .count {
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 0.5rem 1.5rem;
+      padding-bottom: 0.9rem;
+      margin-bottom: 0.4rem;
+      border-bottom: 1px solid var(--line);
       font-family: var(--font-mono);
       font-size: 0.7rem;
       letter-spacing: 0.06em;
       text-transform: uppercase;
       color: var(--ink-faint);
     }
+    .key { display: inline-flex; align-items: center; gap: 0.5rem; }
+    .legend-meta { margin-left: auto; }
+    .dot {
+      width: 11px; height: 11px; border-radius: 50%;
+      flex: 0 0 auto; display: inline-block;
+    }
+    .dot-live { background: var(--accent); }
+    .dot-series { background: var(--paper); border: 3px solid var(--accent); }
+    .dot-planned { background: transparent; border: 1.5px dashed var(--ink-faint); }
 
-    .contents { list-style: none; margin: 0; padding: 0; }
-    .entry { border-bottom: 1px solid var(--line); }
-    .entry > a,
-    .series > summary,
-    .entry-soon {
+    /* trunk line */
+    .line {
+      position: relative;
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      --trunk: 1.4rem;   /* x of the trunk line */
+    }
+    .line::before {
+      content: '';
+      position: absolute;
+      top: 1.6rem; bottom: 1.6rem;
+      left: var(--trunk);
+      width: 2px;
+      transform: translateX(-1px);
+      background: var(--line-strong);
+    }
+    /* signal pulse travelling the trunk */
+    .line::after {
+      content: '';
+      position: absolute;
+      top: 1.6rem; bottom: 1.6rem;
+      left: var(--trunk);
+      width: 2px;
+      transform: translateX(-1px);
+      background: linear-gradient(to bottom, transparent, var(--accent), transparent);
+      background-size: 100% 26%;
+      background-repeat: no-repeat;
+      background-position: 0 -30%;
+      opacity: 0.85;
+      animation: signal 4.5s linear infinite;
+      pointer-events: none;
+    }
+    @keyframes signal { to { background-position: 0 130%; } }
+
+    .station { position: relative; border-bottom: 1px solid var(--line); }
+    .station:last-child { border-bottom: none; }
+
+    .station-row {
       display: grid;
-      grid-template-columns: 2.6rem minmax(0, 1fr) auto;
-      align-items: baseline;
+      grid-template-columns: 2.8rem minmax(0, 1fr) auto;
+      align-items: start;
       gap: 0.4rem 1.2rem;
-      padding: 1.25rem 0.25rem 1.15rem;
+      padding: 1.3rem 0.25rem;
       text-decoration: none;
       color: inherit;
     }
-    .entry > a, .series > summary { transition: background 0.15s var(--ease-out); }
-    .entry > a:hover, .series > summary:hover { background: var(--paper-sunk); }
+    a.station-row, .series > summary.station-row { transition: background 0.15s var(--ease-out); cursor: pointer; }
+    a.station-row:hover, .series > summary:hover { background: var(--paper-raised); }
+    .series > summary { list-style: none; }
+    .series > summary::-webkit-details-marker { display: none; }
+    .series > summary:focus-visible { outline: 2px solid var(--color-focus); outline-offset: -2px; }
 
-    .idx {
+    /* node dot sits on the trunk */
+    .node { display: grid; place-items: center; padding-top: 0.35rem; }
+    .station-row .dot { width: 15px; height: 15px; box-shadow: 0 0 0 5px var(--paper); }
+    .station-row .dot-series { width: 15px; height: 15px; }
+    .station-live:hover .dot-live,
+    a.station-row:focus-visible .dot-live { transform: scale(1.25); transition: transform 0.15s var(--ease-out); }
+
+    .station-body { min-width: 0; display: flex; flex-direction: column; gap: 0.3rem; }
+    .station-coord {
       font-family: var(--font-mono);
-      font-size: 0.82rem;
-      color: var(--accent);
-      padding-top: 0.28rem;
-    }
-    .body { min-width: 0; display: flex; flex-direction: column; gap: 0.28rem; }
-    .title {
-      font-family: var(--font-display);
-      font-weight: 560;
-      font-size: 1.45rem;
-      line-height: 1.15;
-      letter-spacing: -0.015em;
-      color: var(--ink);
-      display: flex;
-      align-items: baseline;
-      gap: 0.7rem;
-      flex-wrap: wrap;
-    }
-    .sub { color: var(--ink-soft); font-size: 1rem; line-height: 1.45; max-width: 46ch; }
-    .badge {
-      font-family: var(--font-mono);
-      font-size: 0.6rem;
-      font-weight: 500;
+      font-size: 0.68rem;
       letter-spacing: 0.1em;
       text-transform: uppercase;
       color: var(--accent);
-      padding: 0.14em 0;
-      border-bottom: 1px solid var(--accent-line);
-      align-self: center;
     }
-    .badge-soon { color: var(--ink-faint); border-bottom-color: var(--line-strong); }
+    .station-planned .station-coord { color: var(--ink-faint); }
+    .station-title {
+      font-family: var(--font-display);
+      font-weight: 600;
+      font-size: 1.6rem;
+      line-height: 1.12;
+      letter-spacing: -0.02em;
+      color: var(--ink);
+    }
+    .station-sub { color: var(--ink-soft); font-size: 1rem; line-height: 1.45; max-width: 48ch; }
 
-    .end {
+    .station-end {
       display: flex;
       align-items: center;
       gap: 0.9rem;
       justify-self: end;
-      padding-top: 0.3rem;
+      padding-top: 0.5rem;
+      white-space: nowrap;
     }
-    .kind {
+    .station-rt, .station-open {
       font-family: var(--font-mono);
-      font-size: 0.62rem;
-      letter-spacing: 0.1em;
-      text-transform: uppercase;
+      font-size: 0.72rem;
+      letter-spacing: 0.04em;
       color: var(--ink-faint);
     }
-    .rt { font-family: var(--font-mono); font-size: 0.72rem; color: var(--ink-faint); white-space: nowrap; }
-    .go {
-      color: var(--accent);
-      font-size: 1.15rem;
-      transition: transform 0.15s var(--ease-out);
-    }
-    .entry > a:hover .go { transform: translateX(4px); }
-
-    .entry-soon { opacity: 0.62; }
-
-    /* ---- Series (collapsible) ---- */
-    .entry-series { padding: 0; }
-    .series { width: 100%; }
-    .series > summary { cursor: pointer; list-style: none; }
-    .series > summary::-webkit-details-marker { display: none; }
-    .series > summary:focus-visible { outline: 2px solid var(--color-focus); outline-offset: -2px; }
-    .browse { color: var(--accent); }
+    .station-open { color: var(--accent); text-transform: uppercase; letter-spacing: 0.1em; font-size: 0.66rem; }
+    .go { color: var(--accent); font-size: 1.15rem; transition: transform 0.15s var(--ease-out); }
+    a.station-row:hover .go { transform: translateX(4px); }
     .chev { color: var(--accent); display: grid; place-items: center; transition: transform 0.2s var(--ease-out); }
     .chev svg { fill: none; stroke: currentColor; stroke-width: 2; }
     .series[open] > summary .chev { transform: rotate(90deg); }
+    .station-planned { opacity: 0.6; }
 
-    .parts { list-style: none; margin: 0 0 0.6rem; padding: 0; border-top: 1px solid var(--line); }
-    .part > a {
+    /* ---- Branch (series parts) ---- */
+    .branch {
+      position: relative;
+      list-style: none;
+      margin: 0 0 0.6rem;
+      padding: 0.2rem 0 0.4rem;
+      --twig: 3.4rem;
+    }
+    .branch::before {
+      content: '';
+      position: absolute;
+      top: 0; bottom: 1rem;
+      left: var(--twig);
+      width: 2px;
+      transform: translateX(-1px);
+      background: var(--line);
+    }
+    .stop > a {
       display: grid;
-      grid-template-columns: 2.6rem minmax(0, 1fr) auto auto;
-      align-items: baseline;
+      grid-template-columns: 4.8rem minmax(0, 1fr) auto auto;
+      align-items: center;
       gap: 0.9rem;
-      padding: 0.7rem 0.25rem 0.7rem 3rem;
+      padding: 0.5rem 0.25rem;
       text-decoration: none;
       color: inherit;
       transition: background 0.12s var(--ease-out);
     }
-    .part + .part > a,
-    .part > a { border-top: 1px solid var(--line); }
-    .part:first-child > a { border-top: none; }
-    .part > a:hover { background: var(--paper-sunk); }
-    .pnum {
+    .stop > a:hover { background: var(--paper-raised); }
+    .stop-node { display: grid; place-items: center; }
+    .stop-dot {
+      display: grid; place-items: center;
+      width: 1.7rem; height: 1.7rem;
       font-family: var(--font-mono);
-      font-size: 0.72rem;
+      font-size: 0.68rem;
       color: var(--accent);
+      background: var(--paper);
+      border: 1.5px solid var(--accent-line);
+      border-radius: 50%;
+      box-shadow: 0 0 0 4px var(--paper);
     }
-    .part-cover .pnum { color: var(--accent); }
-    .ptitle { min-width: 0; font-size: 1.02rem; color: var(--ink); }
-    .part-cover .ptitle { color: var(--ink-soft); font-style: italic; }
-    .part .go { color: var(--accent); font-size: 1rem; transition: transform 0.15s var(--ease-out); }
-    .part > a:hover .go { transform: translateX(3px); }
+    .stop-cover .stop-dot { border-style: dashed; color: var(--accent); }
+    .stop-title { min-width: 0; font-size: 1.02rem; color: var(--ink); }
+    .stop-cover .stop-title { color: var(--ink-soft); font-style: italic; }
+    .stop-rt { font-family: var(--font-mono); font-size: 0.7rem; color: var(--ink-faint); white-space: nowrap; }
+    .stop .go { font-size: 1rem; }
+    .stop > a:hover .go { transform: translateX(3px); }
 
     @media (max-width: 40rem) {
-      .entry > a, .series > summary, .entry-soon {
-        grid-template-columns: 2rem minmax(0, 1fr);
-        gap: 0.3rem 0.9rem;
-      }
-      .title { font-size: 1.25rem; }
-      .end {
-        grid-column: 2;
-        justify-self: start;
-        padding-top: 0.4rem;
-      }
-      .kind { display: none; }
-      .part > a { grid-template-columns: 2rem minmax(0, 1fr) auto; padding-left: 2.2rem; }
-      .part .go { display: none; }
+      .station-row { grid-template-columns: 2.4rem minmax(0, 1fr); gap: 0.3rem 0.9rem; }
+      .station-title { font-size: 1.35rem; }
+      .station-end { grid-column: 2; justify-self: start; padding-top: 0.5rem; }
+      .line { --trunk: 1.2rem; }
+      .branch { --twig: 3rem; }
+      .stop > a { grid-template-columns: 4rem minmax(0, 1fr) auto; }
+      .stop .go { display: none; }
+      .legend-meta { margin-left: 0; flex-basis: 100%; }
     }
   </style>
 </BaseLayout>
