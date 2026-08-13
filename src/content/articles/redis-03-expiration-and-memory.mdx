@@ -1,0 +1,221 @@
+---
+title: "Expiration, eviction & memory"
+subtitle: "Two different clocks: a key you scheduled to die, and a key Redis killed to survive. Conflating them is where cache bugs come from."
+description: "How Redis frees memory: TTL and key expiry vs maxmemory eviction, the LRU/LFU eviction policies, lazy and active expiration, and Redis 8 per-field hash TTL."
+level: "Foundations · Memory model"
+accent: "#c0392b"
+readingTime: "11 min read"
+updated: 2026-08-13
+order: 4
+series: "Redis"
+part: 3
+---
+
+import Callout from '../../components/Callout.astro';
+
+*Redis deep-dive · Part 3 of 10. Previous: [The data types as a design toolkit](/redis-02-data-types/). Next: [Atomicity in depth](/redis-04-atomicity/).*
+
+Redis lives in RAM, and RAM runs out. That single fact forces a question every
+other datastore mostly hides from you: when the machine fills up, what leaves?
+Redis has **two completely different answers** — one you schedule, one it decides
+under pressure — and almost every confusing cache incident in production traces
+back to someone treating them as the same mechanism. They aren't. Keep them
+apart and the whole memory model stops being mysterious.
+
+We'll keep the usual setup in view: an API backed by Postgres, with Redis
+alongside holding caches, sessions, counters, and the odd queue. The two clocks
+we're about to separate are **expiration** (a deadline you set on a key) and
+**eviction** (what Redis does when it hits its memory ceiling).
+
+## Expiration — a per-key deadline you set
+
+Expiration is a promise *you* make about a key: this data is temporary, delete
+it after some time. You attach a TTL — a time-to-live — and Redis removes the
+key when the clock runs out.
+
+```
+SET session:42 "..." EX 3600     # expire in 3600 seconds
+EXPIRE session:42 3600           # same, on an existing key
+PEXPIRE session:42 3600000       # millisecond precision
+TTL session:42                   # seconds remaining (-1 = no TTL, -2 = gone)
+PERSIST session:42               # remove the deadline; key now lives forever
+```
+
+A key with **no** TTL lives until something explicitly deletes it. Expiration is
+a correctness-and-freshness tool: a login session that should end, a cached row
+that shouldn't outlive the underlying data by more than an hour, a one-time token
+that must not be reusable tomorrow. You're saying *this key is supposed to die*.
+
+### How Redis actually removes an expired key
+
+Here's the part that surprises people. Setting a TTL does **not** schedule a
+timer that fires the instant the deadline passes. Redis removes expired keys
+using a *hybrid* of two strategies, and neither is "delete at exactly T."
+
+- **Lazy (passive) expiration.** When a client touches a key, Redis checks its
+  TTL first. If it's past due, Redis deletes it right then and behaves as if the
+  key never existed — a `GET` returns `nil`, the deletion happens as a side
+  effect of the access. An expired key that *nobody touches* just sits in memory.
+- **Active (periodic) expiration.** Roughly ten times a second, Redis samples a
+  batch of keys that have TTLs, deletes the ones that are expired, and — if a
+  high fraction of that sample turned out to be expired — immediately loops and
+  samples again. It's probabilistic: the goal is to keep the share of expired-
+  but-still-present keys below a small percentage, not to sweep them all instantly.
+
+The consequence is worth internalising: **an expired key can still occupy memory
+until it's touched or the active cycle happens to reach it.** TTL is a *logical*
+deadline — after it passes the key is invisible to reads — but it is not an
+instant `free()`. The value is logically gone well before the bytes are.
+
+<Callout type="note" title="Expiry is visible immediately, reclaimed eventually">
+  Two clocks live inside expiration itself. The moment a key's TTL passes it is
+  *logically* expired: any `GET`, `EXISTS`, or `TTL` treats it as absent. But the
+  *memory* it held is only reclaimed when a client next touches the key (lazy) or
+  the periodic scanner samples it (active). Correctness is immediate; memory is
+  lazy.
+</Callout>
+
+## Eviction — Redis under memory pressure
+
+Eviction is the other clock, and it has nothing to do with any TTL you set. It's
+what Redis does when it's about to run out of room.
+
+You give Redis a ceiling:
+
+```
+maxmemory 4gb
+```
+
+When a write would push memory past that ceiling, Redis consults
+`maxmemory-policy` to decide what happens. The policy is where all the nuance
+lives:
+
+| Policy | What it evicts | Eligible keys |
+|--------|----------------|:---:|
+| `noeviction` | nothing — writes error, reads still work | — |
+| `allkeys-lru` | least-**recently**-used | all keys |
+| `allkeys-lfu` | least-**frequently**-used | all keys |
+| `allkeys-random` | a random key | all keys |
+| `volatile-lru` | least-recently-used | only keys with a TTL |
+| `volatile-lfu` | least-frequently-used | only keys with a TTL |
+| `volatile-random` | a random key | only keys with a TTL |
+| `volatile-ttl` | the key expiring soonest | only keys with a TTL |
+
+<Callout type="gotcha" title="noeviction is the default — and it surprises people">
+  Out of the box, `maxmemory-policy` is `noeviction`. At the ceiling, Redis
+  refuses new writes and returns OOM errors while reads keep working. For a
+  system-of-record instance that's the safe default. For a *cache* it's a bug:
+  you wanted Redis to throw away cold data, and instead your writes start failing.
+</Callout>
+
+Two distinctions do all the real work here.
+
+**`allkeys-*` versus `volatile-*`.** The `allkeys` family can evict *anything*,
+TTL or not. The `volatile` family only ever touches keys that carry a TTL — keys
+*you* marked as expirable. That's a scoping choice: `volatile-*` promises Redis
+will only sacrifice data you already declared disposable.
+
+**LRU versus LFU.** LRU means *least recently used* — Redis evicts whatever hasn't
+been accessed for the longest. LFU means *least frequently used* — Redis tracks a
+per-key access **counter** and evicts the least-often-used key regardless of when
+it was last touched. The difference bites on real access patterns: under LRU, a
+genuinely hot key that got hammered once and then went briefly quiet can look
+evictable, and a one-off scan of cold keys can push hot data out because the scan
+made the cold keys "recently used." LFU resists both — it rewards sustained
+popularity, so it's the better fit when you have stable hot rows amid occasional
+bulk scans. Both are **approximate and sampled** — Redis checks a handful of
+candidate keys, not the whole keyspace, to keep eviction cheap on the single
+thread ([Part 1](/redis-01-mental-model/)).
+
+<Callout type="insight" title="Two clocks, not one">
+  Expiry is a **deadline**; eviction is a **bouncer at a full room.** They run on
+  independent clocks. A key can be evicted *before* its TTL if memory fills up.
+  A key with *no* TTL at all can still be evicted under an `allkeys-*` policy.
+  Hold them apart and two classic confusions dissolve at once: "I set an expiry,
+  why did it vanish early?" (it was evicted, not expired) and "why is memory full
+  of keys that should have expired by now?" (they're logically expired but not yet
+  reclaimed). Same server, two different mechanisms, two different clocks.
+</Callout>
+
+## Redis 8 note — per-field hash TTL
+
+For most of Redis's history, TTL was strictly per-**key**. A Hash was one key, so
+you could expire the whole `session:42` Hash but not one field inside it — to give
+a single field its own lifetime you had to split it into a separate key.
+
+As of **Redis 7.4** (and carried into **Redis 8**), that limitation is gone:
+`HEXPIRE`, `HPEXPIRE`, and `HTTL` set and read TTLs on **individual hash fields**.
+A session Hash can now let its CSRF token expire in ten minutes while the
+`user_id` field lives for the whole session — no splitting into separate keys,
+no juggling parallel deadlines by hand.
+
+## Worked example: two kinds of instance
+
+The policy that's correct depends entirely on what the instance *holds*.
+
+**A pure cache in front of Postgres.** Everything in Redis is regenerable — every
+cached value can be rebuilt from a database read. Here you *want* Redis to throw
+cold data away, so set a ceiling and let it evict:
+
+```
+maxmemory 4gb
+maxmemory-policy allkeys-lru      # or allkeys-lfu for stable hot rows
+```
+
+Losing a cached entry costs you exactly one DB re-read — cheap and self-healing.
+`noeviction` on this instance is the bug from earlier: at 4 GB your writes start
+erroring instead of quietly shedding the coldest 5%. Put a TTL on entries too
+(`SET row:99 "..." EX 3600`) as a *freshness* bound — that's the expiration clock
+doing correctness work, entirely independent of the eviction clock reclaiming
+space under pressure. The two run side by side without knowing about each other.
+
+**A mixed instance.** Now suppose the same Redis holds some cache *and* some
+source-of-truth data: a job queue, a distributed lock, a rate-limit counter — keys
+whose only copy lives in Redis. Here `allkeys-lru` is dangerous. Under memory
+pressure it can evict the only copy of a queued job, and that job is simply gone.
+The safer shape: give **only the disposable cache keys** a TTL, and use
+
+```
+maxmemory-policy volatile-lru
+```
+
+Now eviction is scoped to expirable cache keys and can never touch a
+source-of-truth key that has no TTL. (The cleaner answer, when you can afford it,
+is to split cache and source-of-truth onto **separate instances** — then the
+policy question stops being a tightrope.)
+
+<Callout type="gotcha" title="volatile-* with no expiring keys = false protection">
+  `volatile-lru` *sounds* like a safety guarantee — "eviction can only touch keys
+  I marked disposable." But a `volatile-*` policy only evicts keys that **have a
+  TTL**, and it says nothing about staying under the ceiling. Fill memory when
+  *no* key carries a TTL and Redis has nothing eligible to evict — so it behaves
+  exactly like `noeviction`, and new writes fail with OOM errors. Choosing
+  `volatile-lru` isn't a promise you'll stay under the limit; it's a promise about
+  *which* keys are eligible. If nothing is eligible, you get errors, not safety.
+</Callout>
+
+And the lazy/active detail has its own trap worth naming:
+
+<Callout type="gotcha" title="'I expired a million keys at midnight — why is memory still full?'">
+  Say you `EXPIRE` a million keys to all die at midnight. At 12:00:01 every `GET`
+  correctly returns `nil` — yet `used_memory` has barely moved. Nothing's broken.
+  Expiry is *logical*, not physical: those keys are invisible to reads the instant
+  their TTL passed, but their bytes are reclaimed only as clients lazily touch them
+  or the active cycle samples its way through. The keys are "gone" long before the
+  memory comes back.
+</Callout>
+
+## Where this leaves you
+
+Two mechanisms, two clocks, and the discipline to never confuse them. Expiration
+is a per-key deadline you set for correctness and freshness — and it frees memory
+lazily, not instantly. Eviction is what Redis does at its `maxmemory` ceiling,
+governed by a policy you choose deliberately: `allkeys-*` to sacrifice anything,
+`volatile-*` to sacrifice only what you marked disposable, `noeviction` to refuse
+writes and protect every byte. Match the policy to what the instance holds — a
+pure cache wants to evict, a source-of-truth instance must not — and the failure
+modes stop being surprises.
+
+> A key you scheduled to die and a key Redis killed to survive are two different
+> events on two different clocks — keep them separate and the cache bugs go with
+> them.

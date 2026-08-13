@@ -1,0 +1,125 @@
+---
+title: "Running it in prod"
+subtitle: "Every idea in this series shows up here as an operational symptom. The finale: how to find trouble, and the anti-patterns that cause it."
+description: "Diagnosing Redis latency with SLOWLOG and LATENCY, the big-key and hot-key problems, connection pooling, and the anti-pattern checklist — the whole series as operational judgment."
+level: "Intermediate · Design judgment"
+accent: "#c0392b"
+readingTime: "12 min read"
+updated: 2026-08-13
+order: 11
+series: "Redis"
+part: 10
+---
+
+import Callout from '../../components/Callout.astro';
+
+*Redis deep-dive · Part 10 of 10. Previous: [Specialized structures](/redis-09-specialized-structures/).*
+
+Nine parts in, you can pick a data type, reason about atomicity, size a cache, choose a persistence mode, and shard a cluster. This final chapter is where all of it comes due at once. Every idea in this series has an operational shadow — a way it shows up at 3pm on a Tuesday as a latency graph nobody can explain — and running Redis well is mostly the skill of reading those shadows back to their cause. The single thread ([Part 1](/redis-01-mental-model/)), the O(n) commands ([Part 2](/redis-02-data-types/)), the big keys ([Parts 2](/redis-02-data-types/) and [3](/redis-03-expiration-and-memory/)), the fork stalls ([Part 7](/redis-07-persistence/)): none of it was abstract. It was all a preview of this page.
+
+We'll keep hanging examples on the stack you know — a backend API, Postgres behind it as the source of truth, and Redis alongside for the counters, caches, and queues. The difference now is that something is *wrong*, and you have to find it.
+
+## Finding latency problems
+
+When Redis is slow, you don't guess. Redis ships purpose-built tools that point at the exact command and the exact key, and the whole diagnostic skill is knowing which one to reach for first.
+
+**`SLOWLOG GET`** is almost always the first stop. Redis logs any command whose *execution* exceeded `slowlog-log-slower-than` (configured in microseconds), keeping the command, its arguments, a timestamp, and the duration. A `KEYS *` or a `SMEMBERS bighash` that's been stalling the server is sitting right there in the list, named and dated. One caveat worth internalising: it measures execution time only — the time the command held the single thread — and *excludes* the network and I/O around it. That's exactly what you want, because it isolates the part of latency that's Redis's fault.
+
+**`LATENCY LATEST`** and **`LATENCY DOCTOR`** cover the spikes that aren't a single slow command. Redis's latency monitor tracks events and their causes — a fork stall during a snapshot, an expiry cycle, a slow command — and `LATENCY DOCTOR` turns the raw samples into a human-readable diagnosis ("your worst latency is caused by fork; consider…"). When SLOWLOG is empty but latency is real, this is where the fork and expiry culprits surface.
+
+**`INFO`** is the broad-strokes view. Its sections earn their keep: `commandstats` gives per-command call counts and average microseconds (so you can see *which* command dominates), `latencystats` bucket latency percentiles per command, and `memory` and `clients` tell you whether you're under memory or connection pressure. Alongside it, `redis-cli --latency` measures live round-trip latency so you can watch the number move while you work.
+
+**`MEMORY USAGE key`** and **`redis-cli --bigkeys`** find the memory hogs. `--bigkeys` samples the keyspace and reports the largest key of each type; `MEMORY USAGE` gives the byte cost of a specific key. Together they answer "what's actually large in here?" without you having to already know.
+
+<Callout type="insight" title="Read the shape of the symptom">
+  The single thread ([Part 1](/redis-01-mental-model/)) leaves a distinctive
+  fingerprint: when one command blocks, *every* client is slow at once — not just
+  the one that issued the bad command. So the first question isn't "which endpoint
+  is slow?" but "are they *all* slow together?" If yes, you're looking for one
+  blocking command or one big key monopolising the thread — and SLOWLOG plus
+  `--bigkeys` will name it. That head-of-line pattern is the tell that turns a
+  vague "Redis is slow" into a specific hunt.
+</Callout>
+
+## The big-key problem
+
+A **big key** is a single key holding a huge value: a list, set, hash, or sorted set with millions of elements, or a multi-megabyte string. It is the thread that runs through this entire series, because everything that makes it dangerous falls straight out of Part 1's single thread.
+
+- **Any O(n) operation on it blocks the entire server** for the full duration. `SMEMBERS`, `HGETALL`, `LRANGE 0 -1`, `DEL` — each has to walk every element, and while it walks, no other client's command runs. One big key turns a low-latency datastore into a stop-the-world pause.
+- **Even deleting it blocks.** `DEL` frees the memory synchronously, element by element, on the main thread. That's precisely why `UNLINK` exists: it unlinks the key from the keyspace immediately and frees the value *asynchronously* on a background thread, so the reclamation doesn't stall command execution.
+- **It expiring can stall the server** the same way — an expiry that fires on a big key does a synchronous free, so a key can quietly detonate at TTL time with no command in the slowlog to blame ([Part 3](/redis-03-expiration-and-memory/)).
+- **In Cluster it can't be split.** A single key lives on a single shard ([Part 8](/redis-08-ha-and-scale/)), so a big key makes one shard hot and unbalanced while the others sit idle. Sharding can't rescue you from a value that won't shard.
+
+The fix is to *not create them* in the first place. Shard the data across many keys — `feed:{user}:page:1`, `:page:2`, `:page:3` instead of one unbounded list — so no single operation ever touches millions of elements. Cap collections as you write (`LTRIM` a list back to its last N after every push). And prefer the cursor-based scanners — `SCAN`, `HSCAN`, `SSCAN` — which return a bounded slice per call (roughly O(1) per call) over the whole-collection readers `KEYS`, `SMEMBERS`, and `HGETALL`, which are O(n) and block.
+
+## The hot-key problem
+
+A **hot key** is different, and it fools people who've only learned to watch for big keys. Here the value might be tiny and every operation perfectly O(1) — but one key takes a disproportionate share of the traffic. A celebrity's profile, a global counter, a feature-flag blob everyone reads on every request. Because that key lives on one shard, and that shard runs on one thread, the volume all lands on a single core. That one shard saturates while its siblings idle.
+
+Cluster does not help here, and this is the crucial point: sharding distributes *keys* across shards, but a hot *key* is one key, so it can't be distributed. Adding shards leaves the hot one exactly where it was.
+
+The fixes trade something to spread the load:
+
+- **Local caching.** Cache the hot value in the application process for a short TTL. Most reads never reach Redis, so the hot key cools off. You trade a little staleness for a lot of relief.
+- **Replicas.** Serve reads from replicas ([Part 8](/redis-08-ha-and-scale/)) so read volume spreads across several machines instead of hammering the primary.
+- **Key-splitting.** Shard the key itself. A global counter becomes `counter:0` through `counter:9`; each write hits a random shard, and a read sums all ten. You trade a slightly more expensive read for ten-way write spread — the mirror image of the big-key fix.
+
+## Connection management
+
+Connections aren't free. Each new connection is a TCP handshake plus an authentication round-trip, and that setup cost is paid *before* Redis runs a single useful command. Code that opens a fresh connection per request — common in naive handlers and in serverless functions that don't hold state between invocations — spends most of its Redis budget on setup, crushes throughput, and can march straight into `maxclients` and start refusing connections.
+
+The answer is a **connection pool**: a bounded set of long-lived connections that requests borrow and return. The handshake is paid once per pooled connection, not once per request, and the bound protects the server. The other half of the problem is idleness — thousands of connections sitting open still cost Redis effort to track, so a sane pool size matters as much as pooling at all. Watch `connected_clients` and `blocked_clients` in `INFO clients`; a `connected_clients` that climbs with traffic and never falls is the signature of missing pooling.
+
+## The anti-pattern checklist
+
+The whole series, condensed into the mistakes it taught you to avoid. Each links back to where it was earned.
+
+- **`KEYS *` in production** → blocks the single thread walking every key; use `SCAN`. This is the number-one Redis incident. ([Part 1](/redis-01-mental-model/))
+- **Big keys / unbounded collections** → shard, cap with `LTRIM`, delete with `UNLINK`. ([Parts 2](/redis-02-data-types/) and [9](/redis-09-specialized-structures/))
+- **Hot keys** → local cache, replicas, or split the key. ([Part 8](/redis-08-ha-and-scale/))
+- **Pub/Sub as a durable queue** → messages published with no subscriber are gone forever; use Streams for durability and consumer groups. ([Part 6](/redis-06-pubsub-and-streams/))
+- **A blob-in-a-string when you need fields** → you re-serialise the whole object to touch one field; use a Hash. ([Part 2](/redis-02-data-types/))
+- **Synchronised TTLs** → a thousand keys expiring in the same second stampede your database; add jitter to the TTL. ([Part 5](/redis-05-caching-patterns/))
+- **A new connection per request** → pay the handshake every time; use a pool.
+- **Assuming `allkeys-lru` won't evict your durable data** → an eviction policy evicts *any* key under pressure, including the ones you meant to keep; separate cache keys from source-of-truth keys. ([Part 3](/redis-03-expiration-and-memory/))
+
+## A worked example: a 3pm latency alarm
+
+Your P99 API latency starts spiking intermittently. The tell arrives before you've opened a single tool: *every* endpoint that touches Redis is slow together, even ones hitting unrelated keys. That's the single-thread head-of-line signature from Part 1 — you're not looking for a slow endpoint, you're looking for one command hogging the thread.
+
+1. **`SLOWLOG GET 10`.** Near the top, repeated, is `SMEMBERS active_sessions` taking 40ms. There's your blocking command and its key.
+2. **`MEMORY USAGE active_sessions`** and **`SCARD active_sessions`.** It's a Set with three million members — a big key someone created to hold "all active sessions" and then read whole on a hot path.
+3. **Fix the read.** Stop reading the whole set. If the code iterates members, switch to `SSCAN` so each call returns a bounded slice instead of three million at once. If it only ever needed the *count*, redesign it — a HyperLogLog ([Part 9](/redis-09-specialized-structures/)) gives an approximate cardinality in a fixed ~12KB with O(1) reads, or per-shard keys spread the membership. Then delete the old monster with `UNLINK`, not `DEL`, so the cleanup itself doesn't stall the server on its way out.
+4. **Prevent recurrence.** Add `redis-cli --bigkeys` to your monitoring so a growing collection trips an alert long before it hits three million, and add a code-review reflex: any `KEYS`, `SMEMBERS`, or `HGETALL` on a collection that can grow unbounded is a latency incident waiting for a busy afternoon.
+
+<Callout type="gotcha" title="'Redis is slow, so we need a bigger instance / more RAM'">
+  This is the reflex that sends teams shopping for hardware, and it's almost always
+  the wrong move. Redis slowness is rarely raw capacity — it's almost always *one*
+  blocking command or *one* bad key monopolising the single thread. A single
+  `KEYS *`, a three-million-element `SMEMBERS`, a synchronous `DEL` of a big key, or
+  a fork stall spikes latency for *every* client regardless of how big the box is,
+  because a bigger box still has one thread executing your commands. The fix is
+  diagnosis — `SLOWLOG`, `LATENCY`, `--bigkeys` — followed by removing the O(n)
+  operation or the big key. Scale the hardware only after you've confirmed genuine
+  throughput or memory pressure, not a self-inflicted blocking pattern that a
+  larger instance will faithfully reproduce.
+</Callout>
+
+## The series, in one place
+
+Ten parts, in order — so this finale doubles as a map of the whole deep-dive:
+
+1. [Redis, from the ground up](/redis-01-mental-model/) — the single-threaded, in-memory core
+2. [The data types as a design toolkit](/redis-02-data-types/)
+3. [Expiration and memory](/redis-03-expiration-and-memory/)
+4. [Atomicity and transactions](/redis-04-atomicity/)
+5. [Caching patterns](/redis-05-caching-patterns/)
+6. [Pub/Sub and Streams](/redis-06-pubsub-and-streams/)
+7. [Persistence](/redis-07-persistence/)
+8. [High availability and scale](/redis-08-ha-and-scale/)
+9. [Specialized structures](/redis-09-specialized-structures/)
+10. Running it in prod *(this article)*
+
+Every one of those parts was a consequence of Part 1's single-threaded, in-memory core: atomicity because commands run serially, persistence because the data lives in volatile RAM, sharding because one thread can only do so much — and this chapter, because finding trouble in production is really finding the one command or the one key that's monopolising that thread.
+
+> If you can name the single command or the single key monopolising the thread, you can debug Redis better than most people who run it — because you already know the slowness lives there, and not in the size of the box.

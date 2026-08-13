@@ -1,0 +1,145 @@
+---
+title: "Atomicity in depth"
+subtitle: "A single command is atomic for free — but real logic is many commands. Three tools close that gap, and they guarantee different things."
+description: "Pipelining vs MULTI/EXEC/WATCH transactions vs Lua scripting and Functions in Redis: what each actually guarantees, and when to reach for each."
+level: "Intermediate · Concurrency"
+accent: "#c0392b"
+readingTime: "12 min read"
+updated: 2026-08-13
+order: 5
+series: "Redis"
+part: 4
+---
+
+import Callout from '../../components/Callout.astro';
+
+*Redis deep-dive · Part 4 of 10. Previous: [Expiration, eviction & memory](/redis-03-expiration-and-memory/). Next: [Caching patterns done right](/redis-05-caching-patterns/).*
+
+In [Part 1](/redis-01-mental-model/) you learned the sentence that makes Redis click: it runs commands one at a time, on a single thread, so **every single command is atomic for free.** That's a real guarantee — but it only covers *one* command. Real logic is rarely one command. It's "read the balance, and *if* it's at least the price, decrement it" — a read, a decision, and a write. Between your read and your write, another client's command can slip in and change the world underneath you. Three tools exist to close that gap, and people conflate them constantly because they look similar and solve genuinely different problems. This chapter is about telling them apart.
+
+Hold onto the concrete example the whole way through: an inventory counter, `stock:sku`, and two buyers racing for the last item. If you can say exactly which of the three tools fixes the oversell — and why the other two don't — you understand Redis concurrency.
+
+## Pipelining — batching, not atomicity
+
+Normally every command is a round-trip: your client sends one command, waits for the reply, then sends the next. That wait is network latency, and it dominates. Over a link with 1ms round-trip time, 1,000 sequential commands cost roughly 1,000ms — a full second spent almost entirely *waiting*, not computing. Redis executed each in microseconds; the network ate the rest.
+
+Pipelining fixes exactly that. Your client fires all 1,000 commands down the socket without waiting for any reply, then reads all 1,000 replies back in a batch. The ~1,000 round-trips collapse into ~1. On the same 1ms link, the wall-clock cost drops from a second to a few milliseconds.
+
+```
+# Without pipelining: 1000 round-trips
+# With pipelining: send all, then read all — ~1 round-trip
+SET item:1 a
+SET item:2 b
+...            # all sent before any reply is read
+SET item:1000 z
+```
+
+That is the whole story. Pipelining is a **latency optimization** and nothing more. It does *not* make your commands atomic, and it does *not* isolate them. The server still executes each command independently, in order, and **another client's commands can interleave between yours** on the single thread. Pipelining changes when *replies* travel over the network; it changes nothing about how commands are scheduled against everyone else's.
+
+<Callout type="insight" title="Pipelining ≠ transaction">
+  A pipeline is a client-side batching trick. The server sees your pipelined
+  commands as ordinary independent commands that happen to have arrived together —
+  it is free to run another client's command in the middle of your batch. If you
+  pipeline `GET stock:sku` then `DECR stock:sku`, a second buyer's `DECR` can land
+  *between* them. Pipelining buys speed, not safety. Keep the two ideas in
+  separate boxes in your head.
+</Callout>
+
+## Transactions: MULTI / EXEC / WATCH
+
+When you *do* need "these commands run together with nobody in the middle," you reach for a transaction. `MULTI` opens one: subsequent commands aren't executed, they're **queued**. `EXEC` then runs the whole queued batch **atomically and in isolation** — the single thread runs them start to finish with no other client's command interleaved. That's precisely the guarantee pipelining lacks.
+
+```
+MULTI
+DECRBY balance:42 100
+INCRBY spent:42 100
+EXEC                    # both apply together, nothing runs between them
+```
+
+Between `MULTI` and `EXEC` no other client can observe or modify `balance:42` mid-batch. So far this looks like a SQL transaction. It is not, and two caveats are where people get burned.
+
+**No rollback.** Redis transactions are not all-or-nothing. If a command fails *at runtime* — say you `INCR` a key that holds a non-numeric string — the other commands in the batch **still execute**. Redis simply records the error for that one command and carries on. There is no undo, no rollback, no restoration of prior state. (The one exception is a *syntax* error caught while queuing — a malformed command aborts the whole transaction before `EXEC` runs anything at all.) So "transaction" in Redis means *atomic + isolated batch*, not *all-or-nothing with rollback*.
+
+**You can't branch.** The commands are fixed at queue time. You cannot express "read `X`, and *if* `X >= 100` then decrement it," because queued commands don't see each other's results — nothing is visible until `EXEC`, and by then the decision has already been baked in. A plain `MULTI/EXEC` can only run a *predetermined* set of writes. Conditional logic needs something more, and that's what `WATCH` adds.
+
+`WATCH` gives you **optimistic concurrency** — compare-and-swap. You `WATCH balance:42`, read it in your app, decide in your own code whether the balance is sufficient, and only then run `MULTI` / `DECRBY` / `EXEC`. The bet: nobody else touches the watched key between your read and your `EXEC`. If anyone modifies `balance:42` in that window, `EXEC` returns `nil` and executes nothing — the transaction aborts, and you **retry the whole read-check-write loop** from the top.
+
+```
+WATCH balance:42
+val = GET balance:42          # read + decide in your app
+if val >= 100:
+    MULTI
+    DECRBY balance:42 100
+    EXEC                      # nil if balance:42 changed since WATCH → retry
+else:
+    UNWATCH
+```
+
+No locks are held. Redis doesn't block the key; it just *watches* for a change and lets your `EXEC` fail if one happened, so you can react. That's ideal when contention is **low** — collisions are rare, so retries are rare. Under **high** contention it degrades badly: many clients fighting over the same key means most `EXEC`s abort, everyone retries, and they collide again — a retry storm that can livelock, doing lots of work and making little progress.
+
+<Callout type="note" title="WATCH is a detector, not a lock">
+  Optimistic concurrency doesn't prevent the collision — it *detects* it after the
+  fact and declines to apply a stale write. That's a feature: no lock means no
+  blocking, no deadlocks, no lock to forget to release. But it only pays off when
+  collisions are genuinely uncommon. When they're not, the retries are the cost,
+  and that cost grows with contention.
+</Callout>
+
+## Lua scripting (and Functions) — server-side atomic logic
+
+When contention is high, the `WATCH` retry loop is the wrong shape — you're paying for collisions you can't avoid. The heavier hammer: stop shipping *data* back and forth to make a decision in your app, and ship the *logic* to the server instead. A Lua script sent with `EVAL` runs **atomically in one shot**. Recall from [Part 1](/redis-01-mental-model/) that a script occupies the single thread from its first line to its last — so nothing else can interleave, and you get read-then-branch-then-write with **zero races** and no retries.
+
+```lua
+-- EVAL <script> 1 balance:42 100
+-- KEYS[1] = balance:42, ARGV[1] = 100
+local bal = tonumber(redis.call('GET', KEYS[1]))
+if bal >= tonumber(ARGV[1]) then
+  redis.call('DECRBY', KEYS[1], ARGV[1])
+  return 1        -- success
+end
+return 0          -- insufficient balance, nothing changed
+```
+
+This is the conditional logic `MULTI/EXEC` structurally cannot express: a real `if` that reads a live value and decides what to write, all inside one atomic execution. No `WATCH`, no retry loop, no interleaving — because the whole script *is* the one atomic command.
+
+**Redis Functions** (since Redis 7.0) are the modern evolution of the same idea. Instead of shipping script text on every call, you `FUNCTION LOAD` a named function into the server once and then invoke it by name with `FCALL`. Same atomicity and single-threaded execution; better management — versioned, named, loaded as libraries rather than ad-hoc strings scattered through your app code. For anything reused across your codebase, Functions are the cleaner home.
+
+The tradeoff for both is the same footgun from Part 1: a script holds the single thread for its entire duration, so **a long script blocks the whole server** — every other client waits behind it. Atomicity here is bought with the same currency as everything else in Redis: the one thread. Scripts and Functions must be short and fast.
+
+## The decision ladder
+
+Four situations, four answers. Read down until a row matches your problem.
+
+| Your situation | Reach for | Guarantee you get |
+|---|---|---|
+| Just cutting round-trips; order and isolation don't matter | **Pipeline** | Speed only — commands may interleave |
+| A fixed set of writes that must land together, no conditions | **MULTI / EXEC** | Atomic + isolated batch (no rollback) |
+| Read-check-write, **low** contention | **WATCH + MULTI/EXEC** | Optimistic CAS; aborts and you retry on collision |
+| Read-check-write, **high** contention or branching logic | **Lua / Functions** | Atomic read-branch-write in one shot, no retries |
+
+## Worked example: deducting the last item
+
+Now put it against the oversell. Naively, your app does `GET stock:sku`, checks it's greater than zero, then `DECR`. Two buyers hit the last unit at once: both `GET` and see `1`, both pass the check, both `DECR`. Stock lands at `-1` — you sold an item that didn't exist. Classic read-modify-write race, exactly the shape [Part 1](/redis-01-mental-model/)'s rate-limiter avoided by collapsing to a single `INCR`. Here the check-and-decrement can't collapse into one built-in command, so you need one of the tools above.
+
+**WATCH version.** `WATCH stock:sku`, read it, and if it's above zero run `MULTI` / `DECR` / `EXEC`. When two buyers race, one `EXEC` wins and the other returns `nil` because the watched key changed; the loser loops, re-reads, now sees `0`, and is **correctly rejected**. No oversell. For an ordinary product where two people rarely hit the same SKU in the same millisecond, this is exactly right — cheap, lock-free, correct.
+
+**Lua version.** One `EVAL` checks and decrements atomically, returning `1` for sold or `0` for out-of-stock. No retry loop, one round-trip, no interleaving. This is what you want for a **flash sale**, where thousands of buyers hammer the *same* SKU at once and the `WATCH` approach would thrash — nearly every `EXEC` aborting, everyone retrying into the same collision. The script sidesteps the retry storm entirely by making the decision on the server, once, under the single thread.
+
+Same bug, two correct fixes — and the right one depends entirely on contention.
+
+<Callout type="gotcha" title="'I'll pipeline the read and the write so they're atomic'">
+  No. Pipelining only removes round-trips; it does nothing to scheduling. Another
+  buyer's `DECR` still interleaves *between* your pipelined `GET` and `DECR`, so
+  the oversell race is fully intact — you've made the wrong thing faster. Pipelining
+  is about **speed**; transactions and Lua are about **atomicity and isolation.**
+  They're orthogonal concerns, and a pipeline never substitutes for a transaction.
+  (The sibling misconception: *"Redis transactions roll back on error like SQL."*
+  They don't — a runtime error mid-`EXEC` leaves the earlier commands applied, with
+  no undo.)
+</Callout>
+
+Carry the three tools as three distinct jobs. Pipelining answers *how do I stop paying for round-trips?* `MULTI/EXEC` answers *how do I make a fixed batch land together?* Lua and Functions answer *how do I make a decision atomically, even under heavy contention?* The mistake is reaching for the first when you needed the third — and shipping an oversell to production at full speed.
+
+> Pipeline is speed. MULTI/EXEC is an atomic batch. Lua is an atomic decision.
+> When a read-check-write race bites, only the last two can save you — and which
+> one depends on how hard clients are fighting over the same key.

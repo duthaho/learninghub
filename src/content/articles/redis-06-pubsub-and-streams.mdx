@@ -1,0 +1,223 @@
+---
+title: "Messaging: Pub/Sub vs Streams"
+subtitle: "Redis can move messages two ways that sit at opposite ends of the durability spectrum — and picking wrong loses data silently."
+description: "Redis Pub/Sub (fire-and-forget, at-most-once) vs Streams (a durable, replayable log with consumer groups and acks): what each guarantees and when to use which."
+level: "Intermediate · Messaging"
+accent: "#c0392b"
+readingTime: "11 min read"
+updated: 2026-08-13
+order: 7
+series: "Redis"
+part: 6
+---
+
+import Callout from '../../components/Callout.astro';
+
+*Redis deep-dive · Part 6 of 10. Previous: [Caching patterns done right](/redis-05-caching-patterns/). Next: [Persistence: RDB vs AOF](/redis-07-persistence/).*
+
+Redis can move messages between your services in two completely different ways,
+and they sit at **opposite ends of the durability spectrum.** One forgets a
+message the instant it's delivered; the other keeps a replayable log of every
+message you ever sent. They share a mental category — "messaging" — and almost
+nothing else. Picking the wrong one doesn't throw an error or log a warning; it
+just loses data, quietly, under exactly the conditions your dev environment never
+reproduces.
+
+We'll keep hanging the examples on the stack you already run: a backend API with
+Postgres behind it and Redis alongside for the jobs a relational database is bad
+at. Two of those jobs — nudging browsers to refresh, and processing paid orders —
+look similar on a whiteboard and demand opposite tools. Getting that split right
+is the whole chapter.
+
+## Pub/Sub — fire-and-forget broadcast
+
+The older of the two mechanisms is Publish/Subscribe. A subscriber tunes into a
+**channel**; a publisher sends a message to that channel; every client *currently*
+subscribed receives a copy.
+
+```
+SUBSCRIBE news              # subscriber blocks, waiting for messages
+PUBLISH news "hello"        # publisher sends; returns count of receivers
+```
+
+That's the whole model, and its properties follow from one fact: **there is no
+storage.**
+
+- **No persistence.** The message exists only in the instant of delivery. It is
+  not written to a list, a stream, or anywhere else — Redis routes it to live
+  subscribers and then it is gone.
+- **At-most-once delivery.** If a subscriber is offline, slow, or disconnected at
+  the moment of `PUBLISH`, it *misses that message forever.* There is no replay,
+  no history, no backlog to catch up on, and no acknowledgment that anyone
+  received anything.
+- **Fan-out to all live subscribers.** N subscribers on a channel each get their
+  own copy of every message. It's a broadcast, not a queue.
+
+The mental model is a **radio broadcast.** Whoever is tuned in right now hears the
+song; anyone who tunes in a second later never hears what already aired, and the
+station keeps no recording. That's not a flaw — for ephemeral, real-time signals
+where a missed message genuinely doesn't matter, it's exactly the right amount of
+machinery and nothing more.
+
+<Callout type="note" title="PUBLISH tells you how many heard it, not whether it mattered">
+  `PUBLISH` returns the number of clients that received the message. It's tempting
+  to read that as a delivery guarantee — but it only counts who was *tuned in* at
+  that instant. A return value of `0` means nobody was listening and the message
+  evaporated. Redis considers that a completely normal, successful publish.
+</Callout>
+
+## Streams — a durable, replayable log
+
+Streams arrived in **Redis 5.0** and invert nearly every Pub/Sub property. A
+stream is an append-only log of entries, each stamped with an auto-generated ID
+(a `timestamp-sequence` pair like `1690000000000-0`), and the log is **stored in
+Redis** rather than routed and discarded.
+
+```
+XADD orders * user 42 item book     # append an entry; * = auto-generate the ID
+XLEN orders                         # how many entries in the log
+XRANGE orders - +                   # read the whole history = replay
+```
+
+Because the entries are retained, everything Pub/Sub couldn't do becomes possible.
+
+- **Persistent.** Entries survive after delivery — subject to the persistence
+  config underneath ([Part 7](/redis-07-persistence/)) and to any trimming you
+  apply. You can re-read history at will; `XRANGE` *is* replay.
+- **Consumer groups.** With `XGROUP` and `XREADGROUP`, multiple consumers **split
+  the work** of a single stream: each entry is handed to exactly *one* consumer in
+  the group (competing consumers — a work queue), and each delivery must be
+  acknowledged with `XACK`.
+- **At-least-once delivery.** An entry that a consumer has read but not yet
+  `XACK`-ed stays in that consumer's **Pending Entries List (PEL)**. If the
+  consumer crashes mid-job, another consumer can `XCLAIM` the un-acked entry and
+  reprocess it. Nothing is lost just because a worker died holding a message.
+
+The mental model here is **Kafka-lite inside Redis**: a retained log with offsets,
+consumer groups, acknowledgments, and replay — most of the shape of a real log
+broker, living in the datastore you already run.
+
+<Callout type="note" title="'Durable' is only as durable as Part 7 makes it">
+  Calling Streams "durable" is shorthand. An entry is retained in memory and
+  survives *delivery* — but surviving a **process restart or crash** depends
+  entirely on the persistence configuration underneath: RDB snapshots, AOF, or
+  neither. A stream on an instance with persistence disabled is replayable right up
+  until the moment the process dies. We pull that thread apart in
+  [Part 7](/redis-07-persistence/); for now, read "durable" as "far more durable
+  than Pub/Sub, with a config that sets the ceiling."
+</Callout>
+
+## The decision axis: does a missed message matter?
+
+Every messaging choice in Redis collapses to one question. Not "which is faster"
+or "which is newer" — those are distractions. The question is whether losing a
+message is acceptable.
+
+- **No, it's ephemeral — real-time only.** Live presence, "user is typing," a
+  cache-invalidation nudge, a metrics tick. A dropped one costs nothing because
+  the next one arrives shortly, or the state is re-derived on reconnect. → **Pub/Sub.**
+  Cheap, simple, fan-out to everyone listening.
+- **Yes, every message must be processed** — at least once, surviving restarts,
+  ideally spread across multiple workers. Order processing, payment events, a
+  job/task queue, event sourcing. → **Streams.** Durable, acked, replayable, with
+  consumer groups doing the work-splitting.
+
+<Callout type="insight" title="The one-line test">
+  Before you reach for either, ask: **"If a consumer is down for 5 seconds, is it
+  OK to lose every message published in that window?"** If *yes* — a missed
+  presence ping, a stale metric — use **Pub/Sub**. If *no* — a dropped payment, an
+  unfulfilled order — use **Streams**. That single sentence decides it more
+  reliably than any feature comparison, because it targets the only property that
+  actually differs: what happens when the receiver isn't there.
+</Callout>
+
+## Worked example: two features on your stack
+
+Put both mechanisms next to real requirements and the choice makes itself.
+
+**Feature 1 — the live notification badge.** When anything happens to a user, you
+want to ping their connected browser tabs to refresh the unread-count badge. If a
+socket is momentarily disconnected and misses one ping, nothing breaks: the next
+event pings again, or the client refetches its count on reconnect. The signal is
+disposable.
+
+```
+PUBLISH user:42:events "refresh"
+```
+
+Simple fan-out to every live tab, zero storage overhead, no bookkeeping. Pub/Sub
+is the right size for the job.
+
+**Feature 2 — processing new orders.** Every order must be charged and fulfilled
+about exactly-once, by a pool of workers, and it must survive a worker crashing
+mid-charge. This is the opposite requirement, so it gets the opposite tool: a
+stream with a consumer group.
+
+```
+# on checkout:
+XADD orders * order_id 8412 amount 4999
+
+# each worker, in a loop:
+XREADGROUP GROUP fulfillment worker1 COUNT 1 STREAMS orders >
+# ... charge the card, mark fulfilled ...
+XACK orders fulfillment 1690000000000-0
+```
+
+Workers in the `fulfillment` group compete for entries, so throughput scales with
+worker count. If `worker1` crashes after reading an order but before `XACK`, that
+order sits in its PEL; a healthy worker `XCLAIM`s it and finishes the job. **Never
+reach for Pub/Sub here** — a worker restart would silently drop paying customers'
+orders, and you'd find out from the refund tickets, not the logs.
+
+| | Pub/Sub | Streams |
+|---|---|---|
+| Storage | None — routed and discarded | Append-only log, retained |
+| Delivery | **At-most-once** | **At-least-once** |
+| Missed while offline? | Lost forever | Waits in the log; replayable |
+| Acknowledgment | None | `XACK` (PEL tracks un-acked) |
+| Multiple workers | Fan-out (all get a copy) | Consumer group (one gets each) |
+| Mental model | Radio broadcast | Kafka-lite log |
+| Reach for it when | Loss is fine | Loss is unacceptable |
+
+## The landmine: Pub/Sub as a job queue
+
+<Callout type="gotcha" title="'I'll just use Redis Pub/Sub as my job queue / event bus'">
+  This is the classic production landmine. Pub/Sub has **no persistence and no
+  acknowledgment**, so any consumer that is restarting, deploying, slow, or briefly
+  disconnected **silently loses every message published during that window** — with
+  zero trace. It works flawlessly in dev, where your one subscriber is always up,
+  and quietly drops data in prod, where rolling deploys, crashes, and network blips
+  are constant. Concretely: during a rolling deploy, each payment worker
+  disconnects to restart, and any payment `PUBLISH`ed in that window reaches no
+  live subscriber and is simply gone. For anything where loss is unacceptable, use
+  **Streams** — durable, acked, replayable — or a real broker. Pub/Sub is for
+  disposable signals only.
+</Callout>
+
+The reason this trap is so effective is that the failure mode is invisible in
+every environment where you'd catch it. A single always-on subscriber on your
+laptop makes Pub/Sub look like a working queue. It's only the *conditions of
+production* — the very things you can't easily reproduce locally — that expose the
+missing durability. By then the dropped messages are paying orders, and there's no
+log line to grep for because, from Redis's point of view, nothing went wrong.
+
+If you've been around Redis a while, you may remember the old poor-man's queue:
+Lists with `BLPOP`, where a worker blocks until an item is pushed and pops it off.
+That worked, and it's still occasionally the right tool — but it lacked consumer
+groups and per-message acks, so crash-safety and multi-worker coordination were
+things you built by hand. Streams superseded it for most cases precisely by baking
+those in. If you're reaching for `BLPOP` today to build a durable queue, Streams
+is almost always the better answer.
+
+The terminology is worth committing to memory exactly, because the whole decision
+rides on two words that are easy to swap: **Pub/Sub is at-most-once. Streams are
+at-least-once.** At-most-once means a message is delivered zero or one times —
+never twice, but possibly never. At-least-once means it's delivered one or more
+times — never lost, but possibly redelivered (which is why your Stream consumers
+should be idempotent). Neither is "better"; they're guarantees for different
+problems. Naming the guarantee is how you stop yourself from wiring a payment flow
+through a radio broadcast.
+
+> If a consumer is down for five seconds, decide whether losing those messages is
+> fine. "Yes" is Pub/Sub — cheap, ephemeral, fire-and-forget. "No" is Streams —
+> durable, acked, replayable. The answer to that one question is the entire choice.

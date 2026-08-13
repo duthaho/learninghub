@@ -1,0 +1,190 @@
+---
+title: "The data types as a design toolkit"
+subtitle: "Redis isn't a flat map of strings — it's a server of data structures, and picking the right one is a modeling decision."
+description: "How to choose between Redis strings, hashes, lists, sets and sorted sets by matching the operation you need to the type whose complexity makes it cheap."
+level: "Foundations · Data modeling"
+accent: "#c0392b"
+readingTime: "11 min read"
+updated: 2026-08-13
+order: 3
+series: "Redis"
+part: 2
+---
+
+import Callout from '../../components/Callout.astro';
+
+*Redis deep-dive · Part 2 of 10. Previous: [Redis, from the ground up](/redis-01-mental-model/). Next: [Expiration, eviction & memory](/redis-03-expiration-and-memory/).*
+
+The name says key–value store, and that framing quietly costs people the best part of Redis. A value in Redis isn't just a blob you park under a key — it's a **data structure with its own operations and its own complexity guarantees.** You don't store a value and figure out access later; you choose the structure up front, and that choice decides which operations are cheap and which are disasters. Get the type right and the operation you need is O(1) or O(log n). Get it wrong and you're running an O(n) command on the single thread — the exact stop-the-world footgun from [Part 1](/redis-01-mental-model/).
+
+So the skill isn't memorising commands. It's learning to hear the **shape of the question** a feature is asking, and reach for the type whose complexity makes that question cheap. Each of the five core types answers a different shape.
+
+## The five core types
+
+Here's the whole toolkit on one page. Read it as "what question does this type make cheap to answer?"
+
+| Type | Think of it as | Reach for it when |
+|------|----------------|-------------------|
+| **String** | a single cell — text, number, or bytes | you access the whole value at once: counters, flags, cached blobs, rate-limit tokens |
+| **Hash** | an object / row with named fields | you store many fields of one entity and want to read or update them individually |
+| **List** | a linked list, fast at both ends | you push and pop at the ends: queues, stacks, capped recent-activity buffers |
+| **Set** | unique, unordered membership | you care about "is X in here?" and set math: tags, likes, dedup |
+| **Sorted Set** | a set where every member carries a score, kept ordered | you need things ranked or ordered by a number: leaderboards, priorities, time |
+
+### String — the cell
+
+A String is one value under one key: a bit of text, a number, or raw bytes. You get and set it whole.
+
+```
+SET  feature:new_ui  on
+GET  feature:new_ui
+INCR page:home:views          # atomic counter (see Part 1)
+SETEX session:42 3600 <token> # set with a 1-hour TTL
+```
+
+Because Redis knows a String can hold a number, it gives you `INCR` and `INCRBY` as first-class atomic operations — the free-atomicity property from Part 1. Reach for a String when the value is accessed as a whole: a counter, a boolean flag, a cached response body, a rate-limit token.
+
+### Hash — the object
+
+A Hash is a value that itself holds a map of **fields to values** — an object, or a database row. The point is that you can touch one field without loading the rest.
+
+```
+HSET  article:99  title "Redis types"  likes 0  author 42
+HGET  article:99  likes
+HINCRBY article:99 likes 1     # bump one field, atomically, O(1)
+```
+
+That last line is the whole reason Hashes exist. To increment the like count you don't fetch the article, parse it, edit it, and write it back — you tell the server to change one field in place. Reach for a Hash whenever you have many fields of one entity that get read and updated independently.
+
+### List — the queue
+
+A List is an ordered sequence implemented as a linked list, which makes it **fast at the ends and slow in the middle.** `LPUSH`, `RPUSH`, `LPOP`, `RPOP` are all O(1).
+
+```
+LPUSH queue:jobs  <job>        # push onto the head, O(1)
+RPOP  queue:jobs               # pop from the tail, O(1) → FIFO
+LPUSH recent:42 <event>        # newest-first activity feed
+LTRIM recent:42 0 99          # keep only the newest 100
+```
+
+That `LPUSH` + `LTRIM` pair is the canonical capped buffer: a "last 100 events" feed that never grows unbounded. Lists are the natural fit for queues, stacks, and recent-activity logs.
+
+<Callout type="gotcha" title="A List is not an array — random access is O(n)">
+  It's tempting to treat a List like an array, but `LINDEX` into the *middle*, or
+  `LINSERT` before some value, is O(n): Redis walks the links from an end to reach
+  the position. If your access pattern is "find or index an arbitrary element,"
+  the List is the wrong type — you're paying a linear scan on the single thread
+  for something a Set or Sorted Set would make cheap. Lists earn their keep at the
+  **ends**, not the middle.
+</Callout>
+
+### Set — the membership test
+
+A Set is an **unordered collection of unique members.** Adding, removing, and asking "is this in the set?" are all O(1) — and on top of that you get set algebra across whole sets.
+
+```
+SADD    article:99:likers 42   # add a member (duplicates ignored), O(1)
+SISMEMBER article:99:likers 42 # "did user 42 already like this?" O(1)
+SINTER  group:a group:b        # members in BOTH sets
+SUNION  tag:redis tag:cache     # everything tagged either way
+SDIFF   group:a group:b        # in A but not B
+```
+
+Reach for a Set when uniqueness or membership is the question: tags on a post, the set of users who liked something, deduplication, or "who's in both group A and group B?" The set operations let the server answer relationship questions your app would otherwise compute by pulling everything out and looping.
+
+### Sorted Set — the ranked index
+
+A Sorted Set (ZSet) is the powerhouse. It's a Set where every member also carries a **floating-point score**, and Redis keeps the members permanently ordered by that score. That ordering is maintained on write, so range and rank reads are O(log n) rather than requiring a sort.
+
+```
+ZADD leaderboard 4820 player:42   # member with a score
+ZINCRBY leaderboard 10 player:42  # bump a score, stays sorted
+ZREVRANGE leaderboard 0 9 WITHSCORES   # top 10, already ordered
+ZRANK  leaderboard player:42      # "what rank is this member?"
+ZRANGEBYSCORE events 1000 2000    # everything scored in a window
+```
+
+The trick is that the score can *mean* different things, and each meaning unlocks a use case: score = points gives you a **leaderboard**; score = priority gives you a **priority queue**; score = a timestamp gives you a **time-ordered index** or a **sliding-window rate limiter**. One structure, four classic problems solved — because in each case the ordering you need is the ordering the structure maintains for free.
+
+## The decision guide, in one line
+
+Once you can hear the shape of the question, the choice is almost mechanical:
+
+- Whole value or a counter → **String**
+- An object whose fields update independently → **Hash**
+- FIFO / LIFO at the ends → **List**
+- Uniqueness, membership, or set math → **Set**
+- Ordered by a number — ranked or by time → **Sorted Set**
+
+## A worked example: trending articles
+
+Take a real feature off a backend web dev's desk: *show the top 10 trending articles this hour, and on each article's page show its like count.* One feature, but it's asking three different question shapes — so it wants three different types, each chosen because it makes one operation cheap.
+
+**The per-article like count** is a field of the article that you bump on every like. That's a Hash:
+
+```
+HINCRBY article:99 likes 1     # O(1), no need to load the whole article
+```
+
+**The trending ranking** is "these articles, ordered by likes this hour." That's a Sorted Set — bump the score on each like, then read the top slice already sorted:
+
+```
+ZINCRBY trending:articles 1 99          # on each like
+ZREVRANGE trending:articles 0 9 WITHSCORES   # top 10, O(log n + 10)
+```
+
+No app-side sort, no `ORDER BY ... LIMIT 10` hammering Postgres on every page load. Redis hands back the ten already in order.
+
+**Preventing double-likes** is "has this user already liked this article?" — a membership test. That's a Set:
+
+```
+SADD    article:99:likers 42
+SISMEMBER article:99:likers 42   # check before counting, O(1)
+```
+
+Three structures, and the reason each was chosen is the same reason each time: the operation the feature needs is the operation that structure makes cheap.
+
+<Callout type="insight" title="Sorted Set lookups aren't O(1)">
+  A Sorted Set is fast, but "fast" here means **logarithmic, not constant.**
+  `ZRANK` is O(log n); a range read like `ZREVRANGE` is O(log n + M), where M is
+  how many elements you return. That's still excellent — and it's dramatically
+  better than the naive alternative of storing scores in a Hash and sorting them
+  yourself. That costs O(N log N) to sort *plus* an O(N) blocking `HGETALL` to pull
+  every field first — an O(n) read that stalls the single thread ([Part 1](/redis-01-mental-model/)).
+  The Sorted Set keeps the order on write so your reads stay logarithmic. Don't
+  reach for it expecting O(1); reach for it because O(log n) beats sorting by hand.
+</Callout>
+
+<Callout type="note" title="These five aren't the whole shelf">
+  Strings, Hashes, Lists, Sets and Sorted Sets are the core, but Redis ships more
+  specialised structures — bitmaps, HyperLogLog, geospatial indexes, streams —
+  built for narrower jobs like approximate cardinality or append-only event logs.
+  We cover those in [Part 6](/redis-06-pubsub-and-streams/) and
+  [Part 9](/redis-09-specialized-structures/). Master the five first; they carry
+  the vast majority of real work.
+</Callout>
+
+## The anti-pattern: a blob in a String
+
+Here's the most common misuse, and it's worth spelling out because it feels reasonable right up until it bites.
+
+<Callout type="gotcha" title="Serialising an object into one String">
+  You have a user object, so you serialise it to JSON and stuff it in a String:
+  `SET user:42 '{...big json...}'`. It works — and then it doesn't. **(1)** To change
+  one field you read the *entire* blob, parse it, edit it, re-serialise it, and
+  write it all back — wasteful for a one-field update. **(2)** Two requests doing
+  that read-modify-write on the client at once will race and clobber each other:
+  both read the old JSON, both edit their field, both write — last write wins, and
+  a field update silently vanishes. That's exactly the lost-update problem the
+  per-command atomicity from [Part 1](/redis-01-mental-model/) was saving you from,
+  reintroduced by hand. **(3)** You lose server-side field operations like
+  `HINCRBY`. Model it as a **Hash** instead: each field updates independently and
+  atomically on the server, no read-modify-write on the client. The nuance: a blob
+  String is genuinely fine when the value is opaque and always read and written
+  whole — a cached rendered HTML fragment, say. The anti-pattern is specifically
+  reaching for a String when you need to touch fields.
+</Callout>
+
+The through-line of this chapter is the through-line of Redis itself: you're not storing data and hoping, you're choosing an execution profile. Pick the type by the operation you need most, let the structure make that operation cheap, and the single thread stays fast for everyone.
+
+> Don't ask "how do I store this in Redis?" — ask "what operation do I need to be cheap?", then pick the type whose complexity makes it so.

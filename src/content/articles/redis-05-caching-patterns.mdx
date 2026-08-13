@@ -1,0 +1,160 @@
+---
+title: "Caching patterns done right"
+subtitle: "Caching is the reason most people reach for Redis — and the easiest thing to get subtly, expensively wrong."
+description: "Cache-aside vs write-through, why you DEL rather than SET on writes, TTL strategy, and how to survive a cache stampede in Redis."
+level: "Intermediate · Patterns"
+accent: "#c0392b"
+readingTime: "11 min read"
+updated: 2026-08-13
+order: 6
+series: "Redis"
+part: 5
+---
+
+import Callout from '../../components/Callout.astro';
+
+*Redis deep-dive · Part 5 of 10. Previous: [Atomicity in depth](/redis-04-atomicity/). Next: [Messaging: Pub/Sub vs Streams](/redis-06-pubsub-and-streams/).*
+
+Caching is the front door to Redis for almost everyone: the query is slow, so you stash the result and serve it from memory next time. It works on the first try, which is exactly why the failure modes stay hidden until traffic finds them. The hard part isn't putting a value in the cache — it's deciding *who* writes it, *when* it becomes wrong, and *what happens the instant it disappears*. This chapter is about doing all three deliberately, on a familiar stack: a backend API with Postgres behind it and Redis alongside.
+
+We'll build up from the default pattern, sharpen the one write-path rule that trips everyone up, then face the failure mode that turns a cache from a shield into a loaded gun pointed at your database.
+
+## The strategies: who writes the cache, and when
+
+There are only a few ways to arrange a cache and a database, and they differ on one axis: who is responsible for keeping the cache populated, and at what moment.
+
+**Cache-aside (lazy loading)** is the default, and it's what "using Redis as a cache" almost always means. Your application manages the cache directly; Redis knows nothing about Postgres. The two paths look like this:
+
+```
+READ:   val = GET key
+        if hit  -> return val
+        if miss -> val = SELECT ... from Postgres
+                   SET key val EX ttl
+                   return val
+
+WRITE:  UPDATE ... in Postgres
+        DEL key            # invalidate, don't rewrite
+```
+
+Three properties fall out of this shape, and they're the reason it dominates. **Only requested data is ever cached** — a key exists in Redis only because someone actually asked for it, so you never waste memory on rows nobody reads. **A miss costs exactly one extra round-trip** — check Redis, miss, hit Postgres, backfill. And crucially, **if Redis is down you degrade, you don't break** — every miss falls through to the database. Slower, but still correct. That graceful fallback is what makes cache-aside the safe default.
+
+**Write-through** inverts the responsibility: the cache sits *in front* of the database, and every write goes *through* it. The app writes to the cache, and the cache (or the app, synchronously) writes to the database in the same step. The data in the cache is always fresh, because a write can't complete without updating it. The costs are the mirror image of the benefits: every write pays the cache-write latency, and you populate entries for data that may never be read again — you're caching on write, not on demand.
+
+**Write-behind (write-back)** is the asynchronous cousin: write to the cache, acknowledge immediately, and flush to the database later in the background. It's the fastest of the three on the write path, and the most dangerous — if Redis dies before the flush, those writes are simply gone. You're trading durability for latency, which is only acceptable when the data can afford to be lost.
+
+| Pattern | Who writes the cache | Freshness | Main cost |
+|---------|---------------------|-----------|-----------|
+| Cache-aside | App, lazily on read miss | Bounded by TTL + invalidation | Extra round-trip on a miss |
+| Write-through | Cache, synchronously on every write | Always fresh | Every write pays cache cost; caches unread data |
+| Write-behind | Cache, async flush to DB | Fresh in cache, lagging in DB | Can lose writes if Redis dies pre-flush |
+
+Write-through and write-behind are rarer, and usually appear only when a caching library or a specialized layer implements them for you. For hand-rolled application caching, reach for cache-aside first and don't look further unless you have a specific reason.
+
+## Invalidate, don't update (why DEL beats SET on writes)
+
+Look again at the cache-aside write path: on a database write, it does `DEL key`, not `SET key newValue`. That choice looks pedantic — why throw away a value you already have in hand? — but it's the single most important rule in this chapter, and it's a direct descendant of the lost-update race from [Part 4](/redis-04-atomicity/).
+
+Picture two requests updating the same row, each trying to keep the cache fresh with `SET`:
+
+```
+Writer A: UPDATE row = 10           Writer B: UPDATE row = 20
+Writer A: reads row -> 10           Writer B: reads row -> 20
+                                    Writer B: SET key 20
+Writer A: SET key 10        <-- lands last, but is older
+```
+
+Both writers read from the database and then set the cache, but nothing forces those two steps to happen in the same order for both. If A's `SET` lands *after* B's — even though A's value is older — the cache now holds `10` while the database holds `20`. And it stays wrong until the TTL expires. A stale write has won the race and poisoned the cache indefinitely.
+
+`DEL` sidesteps the whole problem. It doesn't matter which writer's `DEL` lands last, because they all do the same thing: remove the key. The next read finds nothing, re-fetches from the authoritative database, and repopulates with the current value. The worst case is a redundant cache miss — never a permanently wrong value.
+
+<Callout type="insight" title="Invalidation is idempotent; updating is order-sensitive">
+  `DEL key` commutes — running it twice, or in any order across concurrent
+  writers, produces the same result: the key is gone. `SET key val` does not —
+  the last writer wins, and "last to run" has nothing to do with "most recent
+  value." That's the whole argument in one line: prefer the operation whose
+  outcome doesn't depend on timing you can't control.
+</Callout>
+
+## TTL strategy
+
+Even with disciplined invalidation, **always put a TTL on cached data.** The two mechanisms are not redundant — they cover different failures. Invalidation handles the writes you know about; the TTL handles the ones you *miss*. Sooner or later a code path will update a row and forget to `DEL` the key, or an invalidation event will get dropped, or a cache entry will drift out of sync for a reason no one predicted. The TTL is the backstop that guarantees every stale entry eventually self-heals, whether or not your invalidation logic was perfect.
+
+Choosing the number is a straight trade-off. A **short TTL** means fresher data and more frequent database hits as entries expire and get rebuilt. A **long TTL** means less database load but more tolerance for staleness. There's no universal right answer — it depends on how wrong the data is allowed to be and how expensive it is to recompute.
+
+There's one more rule that isn't optional, and it becomes obvious the moment we look at how caches fail under load: **jitter your TTLs.** Never expire many keys at the same instant. Why that matters is the next section.
+
+## The failure mode: cache stampede (thundering herd)
+
+Here's the scenario that takes down databases. A hot key expires — or, worse, ten thousand keys that were all written with the *same* TTL expire in the same second. Every request that would have been a cache hit is now a miss, and all of them turn to the database at once to recompute the identical value. Redis was absorbing that read traffic; the instant the key vanishes, that protection evaporates for every concurrent reader simultaneously, and the full weight of production traffic lands on Postgres in a single spike. The database falls over, which makes recomputation slower, which makes the pileup worse. This is the **cache stampede**, or **thundering herd.**
+
+The insidious part is that the cache was doing its job right up until the microsecond it expired. Nothing was slow, no alarm fired — and then a shared expiry converted thousands of cheap cache hits into thousands of expensive database queries at the same timestamp.
+
+There are three standard mitigations, and they stack:
+
+| Mitigation | What it does | When to use |
+|------------|--------------|-------------|
+| **Jittered TTL** | Add randomness to each TTL so expirations spread out instead of firing together | Always — the cheap default |
+| **Recompute lock** | On a miss, one requester takes a lock and rebuilds; the rest wait or serve stale | Hot keys where one DB hit is fine but a thousand isn't |
+| **Early recomputation** | Refresh the value *before* it expires, so it's never actually absent | Very expensive values read constantly |
+
+**1. Jittered / randomized TTL.** Instead of `EX 3600`, use `3600 + rand(0..300)`. Now the expirations that would have bunched up in one second are smeared across a five-minute window, and no single instant sees the whole herd. This is the cheapest fix and the most important one — do it by default on every cached key, and most stampedes never form in the first place.
+
+**2. Recompute lock ("one recomputes").** On a miss, the first requester atomically grabs a short lock — `SET lock:key 1 NX EX 5` — and only the holder recomputes the value and repopulates the cache. Everyone else either waits a beat and re-reads, or serves the last-known value. Ten thousand concurrent misses collapse into a *single* database hit. The `NX` flag ("set only if it doesn't already exist") is the atomic primitive from [Part 4](/redis-04-atomicity/)'s family that makes "exactly one winner" possible without an application-side lock.
+
+**3. Early recomputation.** Refresh the value *before* its TTL runs out — probabilistically as expiry approaches, or from a background job on a schedule — so the key is never actually missing under load. The stampede can't happen because there's never a moment with nothing to serve.
+
+<Callout type="insight" title="Only early-recompute keeps the value never-absent">
+  The lock and early-recompute look similar but differ in one decisive way. A
+  recompute lock still leaves a brief window where the key is *absent* — the
+  holder is mid-rebuild and everyone else is waiting or serving stale. Early
+  recomputation is the only strategy where the value is **never absent at all**;
+  the fresh copy is written before the old one expires. Reach for it when a value
+  is both very expensive to compute *and* read constantly, so you cannot tolerate
+  even a momentary gap.
+</Callout>
+
+## Worked example: the homepage feed
+
+Make it concrete. Your API serves a "homepage feed" assembled from an expensive Postgres query — joins, ranking, the works. The naive cache is one line:
+
+```
+SET homepage:feed <json> EX 60
+```
+
+It works beautifully until traffic arrives. Every 60 seconds, on the dot, the key expires and every in-flight request stampedes Postgres to rebuild the same feed at the same instant. The cache that was supposed to protect the database has scheduled a synchronized attack on it, once a minute, forever.
+
+Here's the same feed done right, combining all three tools:
+
+```
+# 1. Jittered TTL so feeds across the fleet don't expire in lockstep
+SET homepage:feed <json> EX 75        # conceptually 60 + rand(0..15)
+
+# 2. On a miss, one request wins the recompute lock and rebuilds
+SET homepage:feed:lock 1 NX EX 10     # only the NX winner recomputes
+#    winner: run the query, SET homepage:feed with a fresh jittered TTL
+#    losers: serve last-known feed, or wait ~50ms and re-read the key
+
+# 3. On a content change (a new post is published), invalidate
+DEL homepage:feed                     # next read rebuilds from scratch
+```
+
+Note point three: when the content genuinely changes, you `DEL` the whole key and let the next read rebuild it. You do *not* try to surgically splice the new post into the cached JSON — that's the `SET`-on-write race from earlier, wearing a different hat. Drop it, rebuild it, move on.
+
+<Callout type="gotcha" title="'I'll just update the cache on every write to keep it perfectly fresh'">
+  The tempting instinct is: write to Postgres, then immediately `SET key newValue`
+  so the cache is always current. It backfires two ways. First, **races** —
+  concurrent writers can interleave the DB-write and the cache-`SET` so the cache
+  holds a stale value until the TTL expires; `DEL` avoids this entirely because
+  removal is order-independent. Second, **wasted work** — you're writing cache
+  entries that may never be read, turning your cache into a write-amplifier that
+  does extra work on every mutation. The discipline is the opposite: **write the
+  database, invalidate the cache, and let reads repopulate it lazily**, with TTL
+  plus jitter as the safety net. Perfect freshness was never the goal — *bounded
+  staleness without stampedes* is.
+</Callout>
+
+Everything in this chapter reduces to a few disciplined defaults: cache-aside as the pattern, `DEL` not `SET` on writes, a TTL on every key, jitter on every TTL, and a recompute lock on the hot ones. None of it is exotic. It's just the difference between a cache that quietly protects your database and one that periodically fires the whole herd straight through it.
+
+> Caching correctly isn't about keeping the cache perfectly in sync with the
+> database — it's about bounding how stale it can get while never letting it
+> vanish all at once. Invalidate, don't update; TTL everything; jitter always.

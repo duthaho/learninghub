@@ -1,0 +1,131 @@
+---
+title: "HA & scale: replication, Sentinel, Cluster"
+subtitle: "Availability and scale are two different problems. Redis solves them in three layers that build on each other."
+description: "Redis replication, Sentinel-driven automatic failover, and Cluster sharding across 16,384 hash slots — what each layer adds, and why availability isn't zero data loss."
+level: "Intermediate · Operations"
+accent: "#c0392b"
+readingTime: "12 min read"
+updated: 2026-08-13
+order: 9
+series: "Redis"
+part: 8
+---
+
+import Callout from '../../components/Callout.astro';
+
+*Redis deep-dive · Part 8 of 10. Previous: [Persistence: RDB vs AOF](/redis-07-persistence/). Next: [Specialized structures](/redis-09-specialized-structures/).*
+
+People lump two very different problems under one word — "scaling Redis" — and then reach for the wrong tool. The first problem is **availability**: if a Redis node dies at 3am, you want the system to keep serving without a human being paged. The second is **scale**: one instance is a ceiling — a single thread ([Part 1](/redis-01-mental-model/)) and one machine's RAM — and past that you need to spread load across many nodes. These are separate dials, and Redis turns them with three layers that stack on top of each other: replication, then Sentinel, then Cluster.
+
+We'll keep the running example concrete: a backend API on Postgres, with Redis holding the session store. Watch how the answer changes as the requirement moves from "stay up" to "hold more than one box can."
+
+## 1. Replication — the foundation (a copy, not failover)
+
+The base layer is replication. You attach one or more **replicas** to a **primary** (`REPLICAOF host port`), and the primary streams every write it receives out to those replicas. Each replica holds a full, live copy of the dataset.
+
+Three properties define what this does and doesn't buy you:
+
+- **It's asynchronous by default.** The primary does *not* wait for replicas to acknowledge a write before replying to the client. That's what keeps writes fast — but it means a primary can ack a write, then die *before* that write reaches any replica. The write is gone. This is the reason replication alone is never zero-loss.
+- **Replicas serve reads, not writes.** You can point read traffic at replicas to scale read throughput or to serve geo-local reads, but only the primary accepts writes. A replica is read-only.
+- **Replication is not automatic failover.** This is the one everyone gets wrong. If the primary dies, a replica does **not** promote itself. Something must notice the death, choose a replica, promote it, reconfigure the others, and repoint clients. Bare replication hands you a *copy* — it does not hand you *availability*.
+
+<Callout type="note" title="Read-scaling has a consistency cost">
+  Serving reads from a replica means serving *slightly stale* data — because
+  replication is async, a replica can lag the primary by writes that haven't
+  arrived yet. Fine for a cache or a leaderboard; a trap for read-your-own-write
+  flows, where a user updates something and immediately reads it back from a
+  replica that hasn't caught up.
+</Callout>
+
+## 2. Sentinel — automatic failover on top of replication
+
+Replication leaves the hard part manual: detecting the death and promoting a replica. **Sentinel** is a separate set of processes whose entire job is to automate exactly that. Sentinels don't hold your data — they watch the primary and its replicas and act when something goes wrong.
+
+They cover three things:
+
+- **Monitoring.** The Sentinels continuously ping the primary. If enough of them agree it's unreachable — a **quorum** — they declare it down. The quorum matters: requiring several Sentinels to agree stops one Sentinel's momentary network blip from triggering a needless failover.
+- **Automatic failover.** Once failure is declared, the Sentinels elect one of the replicas, promote it to primary, and reconfigure the remaining replicas to follow the new one.
+- **Discovery.** Clients don't hardcode the primary's address. They ask Sentinel "who is the current primary?" — so after a failover, a Sentinel-aware client finds the newly promoted node on its own, without a config change or redeploy.
+
+The division of labour is clean: **replication is the copy; Sentinel is the brain** that detects failure and decides what to promote.
+
+## 3. Cluster — horizontal scale via sharding
+
+Sentinel gives you high availability, but notice what it doesn't give you: every node still holds the *whole* dataset. That's no help when your data or your write load outgrows a single machine — a bigger standby is still one machine. **Redis Cluster** solves the other problem by sharding the data across multiple primaries.
+
+The mechanism is a fixed partitioning of the keyspace:
+
+- The keyspace is divided into **16384 hash slots**. Every key maps to a slot by `CRC16(key) mod 16384`. Each primary in the cluster **owns a range of slots**, and that ownership map is how Cluster decides which node holds any given key.
+- The 16384 slots are **cluster-wide and divided among the nodes** — not 16384 per node. With three primaries you get roughly slots 0–5460, 5461–10922, and 10923–16383; each node owns a *subset*. This is the correction learners most often need: the slot count is a property of the whole cluster, split across it, not a per-node quota.
+- **Failover is built in, per shard.** Each shard (a primary) has its own replicas, and Cluster promotes a replica within that shard when the primary dies — no separate Sentinel deployment required. HA comes bundled.
+- **Clients are cluster-aware.** A cluster client computes the slot itself and talks straight to the owning node. If it guesses wrong or the map has shifted, the node replies with a `MOVED` or `ASK` redirect pointing at the right node.
+
+<Callout type="gotcha" title="Multi-key commands only work within one slot">
+  In Cluster, a command that touches several keys — `MGET a b`, `SINTER x y`, or a
+  `MULTI` transaction across keys — only works if **all** those keys live in the
+  **same slot**. Keys landing on different shards can't be operated on together;
+  Cluster returns a `CROSSSLOT` error. To force related keys into one slot, use
+  **hash tags**: only the substring inside `{...}` is hashed. `user:{42}:profile`
+  and `user:{42}:sessions` both hash on `42`, so they share a slot and multi-key
+  ops over them succeed. You have to design keys for this up front, not discover
+  it after sharding.
+</Callout>
+
+### The layered picture
+
+Each layer adds one thing the layer below couldn't do on its own:
+
+| Layer | What it adds | What it gives you |
+|-------|--------------|-------------------|
+| Replication | Copies of the data (async) | Read scaling and a standby — but *not* failover, and *not* zero-loss |
+| + Sentinel | Automatic failover & discovery | HA for a single dataset that fits on one node |
+| + Cluster | Sharding, plus built-in per-shard failover | HA **and** horizontal scale across machines |
+
+Read that top to bottom as a progression of *needs*: a copy, then automatic recovery of that copy, then splitting the data when one machine isn't enough. You add a layer when the previous one hits its wall — not by default.
+
+## Worked example: a session store that outgrows expectations
+
+Start with the API from the top and follow the session store as the requirement changes.
+
+**Early on**, sessions comfortably fit one machine. What you actually need is *availability* — you don't want a dead box to log every user out. So you run **one primary, one replica, and Sentinel** watching them. Reads (session lookups on every request) can hit the replica; writes go to the primary. When the primary's box dies, Sentinel promotes the replica and your Sentinel-aware client reconnects to the new primary automatically — no page, no manual repoint. You reached for Sentinel because the problem was availability, and the dataset still fit on one node, so you deliberately did *not* reach for sharding.
+
+**Later**, the product grows. Sessions balloon to 200GB — past what one box's RAM can hold — and write throughput saturates the single core that executes commands. Now the problem is *scale*, and Sentinel can't help: a standby is still one machine. You move to **Cluster across, say, 6 primaries** (~33GB each, each with its own replica for failover). A session key `session:{123}` is CRC16'd to a slot that lives on exactly one shard. Because you hash-tagged by user id, a user's related keys — `session:{123}:data`, `session:{123}:flags` — hash on the same `123` and land on the same shard, so `MGET` and transactions across them still work. That last detail is only free because you designed the keys for it before you sharded.
+
+The two stages map exactly onto the table: Sentinel for the availability problem, Cluster once the scale problem arrives on top of it.
+
+## The traps, gathered
+
+<Callout type="insight" title="Primary + replica + Sentinel is still not zero data loss">
+  Sentinel gets you *availability* — a dead primary is replaced automatically — but
+  it does nothing for *durability*. Replication is async: the primary can
+  acknowledge a write to the client and die before that write propagates to any
+  replica. When Sentinel promotes a replica that never received the write, it's
+  gone — even though everything "failed over correctly." **HA is not zero-loss.**
+  Durability is a different concern entirely, handled by persistence
+  ([Part 7](/redis-07-persistence/)), not by failover.
+</Callout>
+
+<Callout type="gotcha" title="'I have a replica, so if the primary dies I'm covered'">
+  No. **Bare replication does not auto-promote.** Without Sentinel — or Cluster's
+  built-in per-shard failover — a dead primary means writes simply *stop* until a
+  human intervenes. The replica just sits there, read-only, holding a perfectly
+  good copy that nothing is allowed to write to. Two more traps ride alongside
+  this one. First: replication is **async**, so even *with* automatic failover you
+  can lose the last few un-replicated writes — "HA" is not "zero data loss."
+  Second, in Cluster: don't assume any multi-key op works — it doesn't across
+  slots, so co-locate related keys with hash tags. Availability, durability, and
+  scale are three separate dials, and a lone replica turns none of them fully.
+</Callout>
+
+The clean way to hold all of this: name the problem before you pick the layer. Do you need to survive a dead node (availability → Sentinel, or Cluster's built-in failover)? To not lose acked writes (durability → persistence, Part 7, plus accepting async's limits)? To hold more than one machine can (scale → Cluster)? Each question points at a different mechanism, and a single replica — the thing people reach for first — is a genuine answer to none of them on its own. It's the raw material the higher layers are built from, not the finished house.
+
+## Where this goes next
+
+The three layers here are the shape of every serious Redis deployment: a copy, a brain to promote it, and — past one machine — a partitioning of the keyspace. Cluster's slot model is also why the sharding mention back in [Part 1](/redis-01-mental-model/) said "N cores across N shards" rather than "one instance with N threads" — each shard's single thread owns its own slice of the data on its own core.
+
+Next we step back down from operations into the datatype toolkit: the [specialized structures](/redis-09-specialized-structures/) — HyperLogLog, bitmaps, geospatial indexes — that trade a little accuracy or a little generality for enormous savings in space and time.
+
+> Availability, durability, and scale are three different problems. Replication is
+> a copy, Sentinel promotes it, Cluster splits it — and if you can say which of
+> the three a given feature actually needs, you'll reach for the right layer
+> instead of hoping a lone replica covers all three.

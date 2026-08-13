@@ -1,0 +1,120 @@
+---
+title: "Persistence: RDB vs AOF"
+subtitle: "Redis lives in RAM — so durability is a dial you choose, not a switch you flip. The question is how big a data-loss window you accept."
+description: "RDB snapshots vs the AOF command log in Redis, the appendfsync durability settings, the data-loss window each leaves, and why you often run both."
+level: "Intermediate · Durability"
+accent: "#c0392b"
+readingTime: "11 min read"
+updated: 2026-08-13
+order: 8
+series: "Redis"
+part: 7
+---
+
+import Callout from '../../components/Callout.astro';
+
+*Redis deep-dive · Part 7 of 10. Previous: [Messaging: Pub/Sub vs Streams](/redis-06-pubsub-and-streams/). Next: [HA & scale](/redis-08-ha-and-scale/).*
+
+Redis lives in RAM — that was the first sentence of this whole series ([Part 1](/redis-01-mental-model/)), and every chapter since has leaned on it. But RAM is volatile: cut the power and the dataset is gone. So the question this chapter answers is the one that clause quietly raised — **if the process dies, what survives a restart?** That's persistence, and Redis gives you two mechanisms for it with almost opposite trade-offs. When we said "Streams are durable" back in [Part 6](/redis-06-pubsub-and-streams/), that word meant *exactly* as much as the persistence config underneath allows — no more.
+
+The two mechanisms are **RDB** (point-in-time snapshots) and **AOF** (an append-only command log). Neither is strictly better; they trade different things. Understanding what each one loses on a crash is the whole game.
+
+## RDB — point-in-time snapshots
+
+RDB works by periodically forking the Redis process and dumping the entire dataset to a compact binary file (`dump.rdb`). It's triggered either by **save rules** in the config or by hand with `BGSAVE`. A save rule looks like this:
+
+```
+save 900 1      # snapshot if >= 1 key changed in the last 900s
+save 300 100    # or if >= 100 keys changed in the last 300s
+```
+
+The strengths and the one big weakness fall straight out of the "one file, written occasionally" design:
+
+- **Compact and fast to restore.** The snapshot is a single binary blob, so loading it on restart is far faster than replaying a log of every write. It's also the ideal thing to copy off-box for backups and disaster recovery — one portable file that represents a clean point in time.
+- **Large data-loss window.** You lose everything written since the last snapshot. Snapshot every five minutes, crash at 4:59, and roughly five minutes of writes are simply gone. There is no record of them anywhere.
+- **Fork cost.** `BGSAVE` forks the process so the main thread keeps serving. On a huge dataset the copy-on-write fork can spike memory (every page the parent then mutates gets duplicated) and briefly stall the server at fork time.
+
+The mental model: RDB takes periodic **photographs** of your data. Sharp, portable, easy to file away — but you only have the moments you happened to photograph, and nothing in between.
+
+## AOF — append-only file (command log)
+
+AOF takes the opposite approach. Instead of snapshotting state, it logs every write command *as it happens*, appended to a file on disk. On restart, Redis **replays** that log from the top to rebuild the dataset exactly. Where RDB is a photo album, AOF is a **journal** of every change, written continuously.
+
+The durability knob is `appendfsync`, and it's the single most important setting in this chapter. It controls how often Redis calls `fsync` to force the operating system to flush its write buffer to physical disk:
+
+| `appendfsync` | fsync frequency | Data-loss window | Speed |
+|---------------|-----------------|------------------|-------|
+| `always` | every write | ~zero (a single command) | slowest — an fsync per command |
+| `everysec` | once per second | ≤ 1 second | good balance — the common default |
+| `no` | OS decides (~30s) | up to tens of seconds | fastest, least safe |
+
+Beyond the knob, two properties define AOF:
+
+- **A much smaller loss window than RDB.** With `everysec`, a crash costs you at most about one second of writes — not the minutes an RDB-only setup risks.
+- **The file grows without bound.** It's a log of every write *ever*, so a key incremented a thousand times leaves a thousand entries. Redis fixes this with **AOF rewrite** (`BGREWRITEAOF`): it compacts the log down to the minimum set of commands that reproduce the *current* state. A thousand `INCR`s collapse into one `SET counter 1000`. The rewrite runs in a background fork, like `BGSAVE`.
+- **Slower restart on a huge log.** Replaying millions of commands takes longer than loading a single binary blob. This is the price of the smaller loss window.
+
+<Callout type="insight" title="'everysec' means at most ~1 second lost — not zero">
+  It's tempting to read `appendfsync everysec` as "durable." It means **at most
+  about one second of writes lost**, not zero. Here's why: `fsync` forces the
+  OS's write buffer to physical disk. Between fsyncs, a command that Redis has
+  "written to the AOF" still lives only in an OS buffer in memory — and a power
+  loss wipes that buffer. `always` gives near-zero loss but pays an `fsync` on
+  every single command, which is usually too slow to run in production. That
+  gap — `always` vs `everysec` — is the **durability-vs-throughput dial**, and
+  you are always choosing a point on it whether you realise it or not.
+</Callout>
+
+## You usually run both
+
+RDB and AOF aren't a fork in the road — they're complementary, and modern Redis is happy to run them together. You take **AOF for the small loss window** (≤ 1s with `everysec`) and **RDB for fast restarts and portable, point-in-time backups**. Each covers the other's weakness.
+
+When both are enabled and Redis restarts, it rebuilds from the **AOF**, because the AOF is the more complete and more recent record — it captured every write up to the last fsync, while the RDB only captured the last snapshot. Redis 4 and later also support a **hybrid file**: an RDB preamble for fast bulk loading, followed by an AOF tail holding the writes since that preamble. You get the blob-speed restart *and* the tight loss window in one file.
+
+<Callout type="note" title="The standard production default">
+  For most services the recommended baseline is **AOF `everysec` plus periodic
+  RDB snapshots**. The AOF bounds your loss to about a second; the RDB gives you
+  a compact file to ship off-box for backups and to restore quickly. You rarely
+  need to think harder than this unless a specific workload demands it — which is
+  exactly what the next section is about.
+</Callout>
+
+## Worked example: three uses, three choices
+
+The right config isn't a property of Redis — it's a property of *what you're storing*. Take the backend web dev's world from the rest of this series: a Postgres database, an API, and Redis alongside it. The same Redis binary wants three different persistence answers depending on the job.
+
+**1. A pure cache in front of Postgres.** The data is regenerable — every value in the cache also exists, authoritatively, in the database. Persistence here is almost optional. RDB snapshots are fine, or even nothing at all: losing the cache on restart just means a spell of cold reads hitting Postgres directly until it warms back up. Paying `always`-fsync for disposable data is spending throughput to protect something you can rebuild for free. Don't.
+
+**2. A Stream processing payments.** This is the [Part 6](/redis-06-pubsub-and-streams/) case, and here the data is *not* regenerable — a paid order event that vanishes is a real order you can't reconstruct. The floor is **AOF `everysec`** (≤ 1s loss), and if losing even a single payment event is unacceptable, you move to **`always`** and accept the throughput hit as the cost of correctness. RDB-only here is dangerous: a crash could silently drop minutes of paid orders, and nothing would tell you they were ever there.
+
+**3. A session store or rate-limit counters.** This sits in the middle. Sessions and counters matter, but losing about a second of them on a rare crash is tolerable — a handful of users re-authenticate, a few rate-limit windows reset slightly early. **AOF `everysec`** is the sweet spot: cheap enough to run without a throughput scare, safe enough that the worst case is a shrug.
+
+| Use | Regenerable? | Config | Why |
+|-----|:---:|--------|-----|
+| Cache over Postgres | Yes | RDB or none | Cold reads on restart; don't pay for disposable data |
+| Payment Stream | No | AOF `everysec` (→ `always`) | A dropped event is a lost order |
+| Sessions / rate limits | Partly | AOF `everysec` | ≤ 1s loss on a rare crash is tolerable |
+
+Notice the through-line: you pick the config by naming the *worst acceptable loss* for that data, then reading it off the dial.
+
+<Callout type="gotcha" title="'AOF is enabled, so my data is safe — zero loss on crash'">
+  Only if `appendfsync always`. With the usual `everysec`, a power failure can
+  still cost you up to about a second of writes, because between fsyncs those
+  writes sit in an OS buffer that the outage wipes — "written to the AOF" is not
+  yet "on the disk platter." A subtler cousin of the same mistake: *"RDB every
+  five minutes protects me."* It protects you **to the last snapshot**, so a
+  crash can cost minutes, not seconds. The fix for both is the same reframe:
+  durability isn't binary — not persistence on vs off. It's a **window** you
+  choose: zero (`always`, slow) → ~1s (`everysec`) → minutes (RDB-only), each
+  step trading throughput for a smaller loss window. Name your acceptable window
+  first, then pick the config that fits it.
+</Callout>
+
+## Where this goes next
+
+Persistence answers "what survives a restart of *this* process." It does nothing for the box itself dying, the disk failing, or the instance simply not being enough — for those you need a *second* Redis, a copy of the data on another machine, ready to take over. That's replication and high availability, and it's built directly on the snapshot and log machinery in this chapter: a replica bootstraps from an RDB-style transfer, then stays current by streaming the write log. [Part 8](/redis-08-ha-and-scale/) picks up exactly there.
+
+> Durability in Redis is a dial, not a switch. `always` buys near-zero loss for
+> the price of an fsync per write; `everysec` buys a one-second window cheaply;
+> RDB-only leaves minutes on the table for the fastest restarts. Name the loss
+> window you can live with for *this* data — then turn the dial to it.

@@ -1,0 +1,52 @@
+---
+title: "The Redis series: start here"
+subtitle: "Ten short deep-dives that build one mental model of Redis — from the single thread to the design calls."
+description: "A guide to the ten-part Redis deep-dive series: what each part covers, who it's for, and the order to read them in."
+level: "Foundations · Series guide"
+accent: "#c0392b"
+readingTime: "3 min read"
+updated: 2026-08-13
+order: 1
+series: "Redis"
+part: 0
+---
+
+Most Redis tutorials hand you a pile of commands — `SET`, `GET`, `LPUSH`,
+`ZADD` — and hope a mental model assembles itself. This series does the opposite.
+It starts from **one idea — Redis runs your commands one at a time, on a single
+thread, in memory — and treats almost everything else as a consequence of it**:
+why `INCR` needs no lock, why one `KEYS *` can freeze your whole server, why a
+Sorted Set is the right tool for a leaderboard, and why "persistence is on"
+doesn't mean "zero data loss."
+
+It's written for a **backend engineer who's comfortable with the basics but wants
+depth** — someone who's run `GET`/`SET` and now wants to model data with the right
+types, cache well, and reason about persistence, failover and production
+incidents. Every idea is hooked onto something you already know — a Postgres
+table, a cache in front of it, a job queue — and every part ends with the one
+misconception that trips people up in production, not a wall of trivia.
+
+## The ten parts
+
+1. **[Redis, from the ground up](/redis-01-mental-model/)** — the single-threaded, in-memory core, why that makes every command atomic for free, and why one slow command hurts everyone.
+2. **[The data types as a design toolkit](/redis-02-data-types/)** — strings, hashes, lists, sets and sorted sets: not APIs to memorise, but a modeling decision about which operations stay cheap.
+3. **[Expiration, eviction & memory](/redis-03-expiration-and-memory/)** — TTL vs eviction (two different clocks), the `maxmemory` policies, and how expiry actually removes keys.
+4. **[Atomicity in depth](/redis-04-atomicity/)** — pipelining (not atomic), `MULTI`/`EXEC`/`WATCH` (atomic), and Lua/Functions (atomic *and* conditional) — and when to reach for each.
+5. **[Caching patterns done right](/redis-05-caching-patterns/)** — cache-aside vs write-through, why you `DEL` instead of `SET` on writes, and how to survive a cache stampede.
+6. **[Messaging: Pub/Sub vs Streams](/redis-06-pubsub-and-streams/)** — fire-and-forget broadcast vs a durable, replayable log with consumer groups — and the landmine of using the wrong one.
+7. **[Persistence: RDB vs AOF](/redis-07-persistence/)** — snapshots vs the command log, the data-loss window each leaves, and why durability is a dial, not a switch.
+8. **[HA & scale](/redis-08-ha-and-scale/)** — replication, Sentinel-driven failover, and how Cluster shards keys across 16,384 hash slots.
+9. **[Specialized structures](/redis-09-specialized-structures/)** — bitmaps, HyperLogLog, geo and Redis 8 vector sets: trading a little accuracy or generality for huge space savings.
+10. **[Running it in prod](/redis-10-running-in-prod/)** — finding latency (`SLOWLOG`, `LATENCY`), the big-key and hot-key problems, connection pooling, and the anti-pattern checklist.
+
+## How to read it
+
+Parts 1–3 are the foundation — the execution model, the data model, and how
+memory is managed. Don't skip them; the rest leans on them constantly. Parts 4–6
+are the working surface you'll use daily: atomic operations, caching, and
+messaging. Parts 7–10 are the operational and design judgment that turn "I can
+run a command" into "I can decide how Redis is deployed and debug it at 3am."
+
+> Everything version-sensitive here was checked against **Redis 8.x** (mid-2026);
+> the core concepts are stable across 7.x and 8.x, and hold for the Valkey fork
+> too. Start with [Part 1](/redis-01-mental-model/).

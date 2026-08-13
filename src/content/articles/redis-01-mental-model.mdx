@@ -1,0 +1,135 @@
+---
+title: "Redis, from the ground up"
+subtitle: "One thread, held in memory — and why that single design choice explains almost everything else."
+description: "A mental-model-first introduction to Redis: the single-threaded, in-memory core, why every command is atomic for free, and why one slow command stalls the whole server."
+level: "Foundations · Beginner-friendly"
+accent: "#c0392b"
+readingTime: "10 min read"
+updated: 2026-08-13
+order: 2
+series: "Redis"
+part: 1
+---
+
+import Callout from '../../components/Callout.astro';
+
+*Redis deep-dive · Part 1 of 10. Next: [The data types as a design toolkit](/redis-02-data-types/).*
+
+Most people meet Redis as "the fast key–value cache." That's true, but it's the
+least interesting thing about it — and it hides the one idea that makes the whole
+system click. Redis is an **in-memory data structure server that runs your
+commands one at a time, on a single thread.** Hold onto that sentence. Almost
+every strength, quirk, and footgun in Redis falls out of it.
+
+We'll hang the examples on something you already know: a backend API with a
+Postgres database behind it, and Redis sitting alongside for the things a
+relational database is bad at — counters, caches, queues, rate limiters.
+
+## The mental model: one thread, in memory
+
+A traditional database assumes its data lives on disk and that many queries run
+at once. Redis assumes the opposite: the dataset lives in **RAM**, and commands
+execute **serially** through a single-threaded event loop. It reads a command,
+runs it to completion, then reads the next one. There is no second command
+running "at the same time."
+
+That sounds like a limitation — one CPU core doing all the work? — but it buys
+something valuable: **every single command is atomic, for free.** No two commands
+can interleave, because there is no interleaving. When Redis executes `INCR`, it
+reads the number, adds one, and writes it back with zero chance of another client
+sneaking in between those steps.
+
+<Callout type="insight" title="Why INCR needs no lock">
+  In most languages, `counter += 1` across threads is a classic race: two threads
+  read `41`, both write `42`, and you lose an increment. In Redis, `INCR` is safe
+  under thousands of concurrent clients **without any client-side lock** — not
+  because Redis locks the key, but because the single thread runs each command to
+  completion before starting the next. Atomicity isn't added on top; it's a
+  property of the execution model.
+</Callout>
+
+### A worked example: rate limiting
+
+Say you want "max 100 requests per user per minute." In your app server against
+the database, you'd `SELECT` the count, check it, and `UPDATE count + 1` — a
+read-modify-write race. Two concurrent requests both read 99, both decide they're
+under the limit, both write 100. You'd need a transaction or a row lock.
+
+In Redis it collapses to two commands:
+
+```
+INCR ratelimit:user:42        # atomic; returns the new count
+EXPIRE ratelimit:user:42 60   # first hit sets the 60-second window
+```
+
+`INCR` returns the post-increment value atomically. Ten app servers hammering the
+same key at once each get a distinct, correctly-ordered count — because Redis
+serialises them on its one thread. No lock, no race, no coordination in your app.
+*That* is the property you're buying, and it's why counters, locks and rate
+limiters are such a natural fit for Redis.
+
+## The flip side: one slow command hurts everyone
+
+The same serial execution that gives you free atomicity is also the sharpest
+footgun in the system. Because one thread does everything, **a single slow command
+blocks every other client.** Ask Redis to run `KEYS *` on a million-key database,
+or `SMEMBERS` on a ten-million-element set, or a heavy `SORT`, and the whole
+server stalls while that one O(n) command grinds through — every other request,
+for every other key, waits behind it.
+
+This is the fingerprint of most Redis latency incidents: latency spikes and
+*every* client is slow at once, not just the one that issued the bad command.
+Redis is blindingly fast because each operation is usually O(1) or O(log n) and
+lives in RAM. It stays fast only if you keep each operation small. Hand it one
+O(n) command on a large value and you've turned your low-latency datastore into a
+stop-the-world pause.
+
+<Callout type="note" title="But isn't Redis multi-threaded now?">
+  Modern Redis does use extra threads — for network I/O (since 6.0), and for
+  background jobs like snapshotting, AOF rewrites, and `UNLINK`. But the part that
+  matters here, **command execution logic**, is still effectively serial on the
+  main thread. The mental model holds: your data operations happen one at a time.
+</Callout>
+
+So the two things to carry forward:
+
+- **Serial execution → single-command atomicity is free.** Reach for Redis when
+  you need atomic counters, locks, and read-modify-write without app-side
+  coordination.
+- **Serial execution → one heavy command hurts everyone.** Keep operations small
+  and fast; O(n) commands on big values are the classic incident.
+
+## Fast, but not infinitely scalable per instance
+
+If one thread executes all commands, one Redis process can only use one core for
+that work — no matter how many cores the box has. That isn't a *speed* problem
+(a single instance still does 100k+ ops/sec, precisely because it avoids lock
+contention and context-switching), but it *is* a throughput ceiling.
+
+<Callout type="gotcha" title="'Single-threaded means slow' — and the wrong fix">
+  Single-threaded doesn't mean slow, and "make Redis multi-threaded" isn't the
+  scaling answer. Adding threads to command execution would reintroduce the very
+  locking overhead that makes Redis fast. The real scaling path is **horizontal**:
+  run multiple instances and **shard the keyspace across them** (Redis Cluster,
+  [Part 8](/redis-08-ha-and-scale/)), so each shard's single thread handles a
+  slice of the data on its own core. You turn "one core" into "N cores across N
+  shards" — not "one instance with N threads."
+</Callout>
+
+## Where this goes next
+
+Everything in this series is a consequence of the two ideas above. Atomic
+transactions ([Part 4](/redis-04-atomicity/)) matter *because* commands are
+serial. Persistence ([Part 7](/redis-07-persistence/)) matters *because* the data
+lives in volatile RAM. Sharding ([Part 8](/redis-08-ha-and-scale/)) matters
+*because* one thread can only do so much. And the whole prod-debugging chapter
+([Part 10](/redis-10-running-in-prod/)) is really about finding the one command
+or the one big key that's monopolising that single thread.
+
+Next, we turn the single thread into a design tool: Redis isn't a flat map of
+strings, it's a server of **data structures**, and picking the right one is the
+difference between an O(1) operation and a server-stalling O(n) one.
+
+> If you can explain why `INCR` is safe without a lock, and why a giant
+> `SMEMBERS` is dangerous, you already understand Redis better than most people
+> who use it daily.

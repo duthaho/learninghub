@@ -1,0 +1,149 @@
+---
+title: "Specialized structures: bitmaps, HyperLogLog, geo, vector sets"
+subtitle: "Purpose-built structures that trade a little accuracy or generality for huge space savings — if you recognise the problem that unlocks each one."
+description: "When to reach for Redis bitmaps, HyperLogLog, geospatial indexes and Redis 8 vector sets — the space-efficient and probabilistic tools beyond the five core types."
+level: "Intermediate · Data structures"
+accent: "#c0392b"
+readingTime: "11 min read"
+updated: 2026-08-13
+order: 10
+series: "Redis"
+part: 9
+---
+
+import Callout from '../../components/Callout.astro';
+
+*Redis deep-dive · Part 9 of 10. Previous: [HA & scale](/redis-08-ha-and-scale/). Next: [Running it in prod](/redis-10-running-in-prod/).*
+
+Beyond the five core types you met in [Part 2](/redis-02-data-types/) — strings, lists, hashes, sets, sorted sets — Redis carries a second shelf of structures that most people never open. They aren't general-purpose. Each one trades a little accuracy or a little generality for a *huge* space saving or a specific query shape, and the whole skill is recognising, in front of a requirement, the one problem that unlocks each. Get the match right and a job that would eat gigabytes fits in kilobytes; get it wrong and you've stored the wrong thing entirely.
+
+We'll keep hanging examples on the same stack: a backend API on Postgres, with Redis alongside for the things a relational database is bad at.
+
+## Bitmaps — one bit per item, exact
+
+A bitmap isn't really a distinct type. It's a plain **string treated as a bit array** — every byte is eight addressable bits, and the bit commands let you flip and count them. `SETBIT key offset 0|1` sets the bit at a position, `GETBIT key offset` reads it, `BITCOUNT key` counts the set bits, and `BITOP AND|OR|XOR dest src...` combines two bitmaps into a third.
+
+The unlock is this: whenever you can map each entity to a **dense integer id**, you can store one boolean per entity for one bit each. The classic case is daily active users. Mark a user active for the day with a single command:
+
+```
+SETBIT active:2026-08-04 12345 1   # user 12345 was active today
+BITCOUNT active:2026-08-04         # how many distinct users active today
+BITOP AND active:week active:2026-08-04 active:2026-08-05 ...  # active EVERY day
+```
+
+The bit at *offset = user id* is the whole trick. Ten million users is ten million bits ≈ **1.25 MB per day** — exact, tiny, and the set operations are essentially free. `BITOP AND` across a week's keys gives you the users active on every single day; `BITOP OR` gives you anyone active at all. The catch is baked into the design: it only works when ids are dense integers, because the offset *is* the id. Sparse or huge ids (a user id of 4 billion) allocate a bit array up to that offset and waste enormous space on the gaps.
+
+## HyperLogLog (HLL) — approximate cardinality, fixed tiny memory
+
+HyperLogLog answers exactly **one** question — *"how many distinct items have I seen?"* — and it answers it without storing the items at all. `PFADD key <item>` observes an item, `PFCOUNT key` returns the estimated cardinality, and `PFMERGE dest src...` unions several sketches.
+
+Two properties make it remarkable:
+
+- **Fixed ~12 KB**, regardless of whether you've counted a hundred items or a billion. The memory does not grow with cardinality.
+- **Approximate: ~0.81% standard error.** You get the *count*, and only the count. You can never ask "is X in it?" and you can never retrieve the members — there are no members to retrieve.
+
+This is the direct answer to the unbounded-Set problem. A `Set` gives you exact membership, but its memory grows with every element you add — the big-key hazard we'll meet again in [Part 10](/redis-10-running-in-prod/), and the reason the [Part 2](/redis-02-data-types/) discussion warned against unbounded blobs. If you only need to know *how many* unique ids, not *which* ones, HLL replaces that unbounded Set with a flat 12 KB.
+
+<Callout type="insight" title="Bitmap vs HLL: same job, opposite trade-offs">
+  Both structures count, and that surface similarity is where people pick wrong.
+  A **bitmap** is *exact*, needs *dense integer ids*, and its memory grows with the
+  id-space (offset = id). An **HLL** is *approximate* (~0.81% error), accepts *any*
+  item — a UUID, a URL, a cookie string — and stays a fixed ~12 KB no matter how
+  many uniques. Choose the bitmap when you need exactness, have dense ids, and the
+  scale is modest. Choose HLL when the items are huge or arbitrary and you can
+  trade ~1% error for constant memory. The question isn't "which counts uniques?"
+  — both do — it's "do I have dense ids and need exactness, or arbitrary items and
+  tolerance for a little error?"
+</Callout>
+
+## Geospatial — radius queries on coordinates
+
+The geo commands are built on top of **sorted sets**: each member's score is a geohash that encodes its longitude and latitude into a single sortable number. You never see that encoding — you just add points and query by distance. `GEOADD key <lon> <lat> <member>` stores a location, `GEOSEARCH key ... BYRADIUS 5 km` finds everything within a radius (or `BYBOX` for a rectangle), and `GEODIST key a b` returns the distance between two members.
+
+```
+GEOADD stores -0.1276 51.5072 store:42
+GEOSEARCH stores FROMLONLAT -0.1300 51.5090 BYRADIUS 3 km ASC
+```
+
+This is the tool for "restaurants within 2 km," "drivers near this rider," "stores near this postcode." You get distance and radius/box queries — sorted nearest-first — without standing up a separate geospatial database, and because it's a sorted set underneath, the lookups are the same fast O(log n) you already trust.
+
+## Vector sets — Redis 8's new type (similarity search)
+
+Vector sets are the **first new Redis data type in years**, introduced in Redis 8. They store high-dimensional **embedding vectors** and do approximate nearest-neighbour search: `VADD key <vector> <member>` stores an embedding under a member name, and `VSIM key <query-vector>` returns the members whose vectors are most *similar* to the query.
+
+```
+VADD articles VALUES 384 0.12 -0.98 ... article:512   # store an embedding
+VSIM  articles VALUES 384 0.10 -0.95 ... COUNT 10      # 10 most similar articles
+```
+
+That "closest embeddings" operation is the building block under semantic search, recommendations, and RAG retrieval — *"find the ten items whose meaning is closest to this one."* Instead of matching keywords, you match vectors produced by an embedding model, so "car" and "automobile" land near each other. Redis also has the older RediSearch / `FT.*` vector index, which still works and offers more query knobs; vector sets are the **native, simpler-to-use** form when you just need to add vectors and ask for the nearest.
+
+## A decision guide
+
+Each structure maps to a distinct question. Once you can name the question, the choice is mechanical.
+
+| The problem you have | Reach for |
+|----------------------|-----------|
+| Per-entity boolean, dense integer ids, need **exact** answers | **Bitmap** |
+| Count of **distinct** things, huge/arbitrary items, ~1% error OK | **HyperLogLog** |
+| "Near this location" / "within this radius" | **Geo** |
+| "Similar to this embedding" (semantic search, recommendations) | **Vector set** |
+
+## Worked example: analytics for a web app
+
+Put these side by side on one product and the boundaries sharpen.
+
+**"Unique visitors per day."** Hundreds of millions of *arbitrary* visitor ids — cookies and UUIDs, not dense ints — and you only need the number. This is HLL's home:
+
+```
+PFADD visitors:2026-08-04 <visitorId>          # one per request; dedup is free
+PFCOUNT visitors:2026-08-04                     # today's unique count
+PFMERGE visitors:week visitors:2026-08-04 ...   # weekly uniques across 7 keys
+```
+
+That's ~12 KB per day versus the gigabytes a `Set` of every UUID would cost — and you never needed the actual ids, only the count.
+
+**"Did *this* logged-in user visit today?"** Now it's exact membership by a dense integer id, so it's a bitmap:
+
+```
+SETBIT visited:2026-08-04 <userid> 1   # mark the visit
+GETBIT visited:2026-08-04 <userid>     # exact yes/no for this user
+BITCOUNT visited:2026-08-04            # and the total still falls out for free
+```
+
+**"Show stores within 3 km."** A radius query on coordinates — geo:
+
+```
+GEOSEARCH stores FROMLONLAT <lon> <lat> BYRADIUS 3 km ASC
+```
+
+**"Recommend articles similar to the one being read."** Semantic closeness over embeddings — vector set: take the current article's embedding and `VSIM` for its nearest neighbours.
+
+Same feature area, four different structures — because each sub-question has a different shape, and the shape is what picks the tool.
+
+<Callout type="note" title="These are still values on the single thread">
+  None of this escapes the [Part 1](/redis-01-mental-model/) rule. A `PFCOUNT` over
+  a merged sketch, a `BITOP` across a week of large bitmaps, or a `VSIM` over a
+  huge vector set is still one command on the one thread — keep them bounded, the
+  same way you'd avoid a giant `SMEMBERS`.
+</Callout>
+
+<Callout type="gotcha" title="'I'll use HyperLogLog to store my unique users so I can also check if a specific user is in the set.'">
+  No — and this is the trap the whole chapter is built to prevent. An HLL stores
+  **no members**, only a probabilistic sketch that yields the *count*. You cannot
+  ask "is user X here?" (membership) and you cannot list who's in it (retrieval) —
+  those operations don't exist on an HLL, because the data isn't there. Membership
+  is a `Set` (exact) or a **Bloom filter** (approximate, and also tiny). HLL
+  answers "how many distinct" and *nothing else*. The seductive error is assuming
+  "counts uniques" implies "knows which uniques" — it deliberately doesn't, and
+  that deliberate forgetting is *exactly why* it fits in 12 KB. Match the structure
+  to the precise question: **COUNT** → HLL, **MEMBERSHIP** → Set or Bloom filter,
+  **per-id boolean** → Bitmap.
+</Callout>
+
+The through-line across all four is the same discipline you've been building the whole series. General-purpose structures answer many questions adequately; these specialized ones answer *one* question superbly and refuse the rest. Their power and their limits are the same fact seen from two sides — the HLL is small *because* it forgot the members, the bitmap is exact *because* it demands dense ids. Reach for them when your requirement is that narrow, and you trade generality you weren't using for space savings or query shapes you couldn't otherwise afford.
+
+> The specialized structures reward one skill above all: reading a requirement and
+> naming its exact question — count, membership, radius, or similarity — because
+> the question, not the data, is what tells you which tool fits in kilobytes
+> instead of gigabytes.
