@@ -3,6 +3,7 @@ import '../styles/global.css';
 import Header from '../components/Header.astro';
 import Footer from '../components/Footer.astro';
 import ScrollTop from '../components/ScrollTop.astro';
+import { site, author, seo } from '../site.config';
 
 interface Props {
   title: string;
@@ -11,11 +12,38 @@ interface Props {
   // Show the coffee button in the footer. Off for pages that already carry a
   // prominent support CTA (e.g. the article-end card) to avoid a double ask.
   footerSupport?: boolean;
+  /** Social-share image (root-relative or absolute). Defaults to the site card. */
+  image?: string;
+  /** OpenGraph type — 'website' for listing pages, 'article' for deep-dives. */
+  ogType?: 'website' | 'article';
+  /** ISO dates for article pages; power article:*_time + structured data. */
+  publishedTime?: string;
+  modifiedTime?: string;
+  /** JSON-LD structured data object(s) injected into <head>. */
+  jsonLd?: Record<string, unknown> | Record<string, unknown>[];
+  /** Keep the page out of search indexes (e.g. the 404 page). */
+  noindex?: boolean;
 }
 
-const { title, description, accent, footerSupport = true } = Astro.props;
+const {
+  title,
+  description,
+  accent,
+  footerSupport = true,
+  image,
+  ogType = 'website',
+  publishedTime,
+  modifiedTime,
+  jsonLd,
+  noindex = false,
+} = Astro.props;
+
 const base = import.meta.env.BASE_URL;
 const canonical = new URL(Astro.url.pathname, Astro.site);
+// Absolute URL for the share image (crawlers require a fully-qualified href).
+const ogImage = new URL(image ?? `${base}${seo.defaultImage}`, Astro.site);
+const twitter = author.twitter ? `@${author.twitter.replace(/^@/, '')}` : undefined;
+const jsonLdBlocks = jsonLd ? (Array.isArray(jsonLd) ? jsonLd : [jsonLd]) : [];
 ---
 
 <!doctype html>
@@ -27,10 +55,45 @@ const canonical = new URL(Astro.url.pathname, Astro.site);
     <title>{title}</title>
     <meta name="description" content={description} />
     <link rel="canonical" href={canonical} />
+    <meta name="author" content={author.name} />
+    <meta
+      name="robots"
+      content={noindex ? 'noindex, follow' : 'index, follow, max-image-preview:large, max-snippet:-1'}
+    />
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content={seo.themeLight} />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content={seo.themeDark} />
+
+    {/* Open Graph */}
     <meta property="og:title" content={title} />
     <meta property="og:description" content={description} />
-    <meta property="og:type" content="website" />
+    <meta property="og:type" content={ogType} />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:site_name" content={site.name} />
+    <meta property="og:locale" content={seo.locale} />
+    <meta property="og:image" content={ogImage} />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content={`${site.name} — ${site.tagline}`} />
+    {ogType === 'article' && publishedTime && (
+      <meta property="article:published_time" content={publishedTime} />
+    )}
+    {ogType === 'article' && modifiedTime && (
+      <meta property="article:modified_time" content={modifiedTime} />
+    )}
+    {ogType === 'article' && <meta property="article:author" content={author.name} />}
+
+    {/* Twitter / X card */}
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={title} />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={ogImage} />
+    {twitter && <meta name="twitter:site" content={twitter} />}
+    {twitter && <meta name="twitter:creator" content={twitter} />}
+
     <meta name="generator" content={Astro.generator} />
+    {jsonLdBlocks.map((block) => (
+      <script type="application/ld+json" set:html={JSON.stringify(block)} />
+    ))}
     {/* Set theme before first paint to avoid a flash of the wrong theme. */}
     <script is:inline>
       (function () {

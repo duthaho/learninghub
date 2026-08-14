@@ -7,6 +7,26 @@ export const site = {
   tagline: 'backend systems, understood, not memorised',
 };
 
+/** Author / publisher identity used in meta tags and structured data. */
+export const author = {
+  name: 'duthaho',
+  /** Personal/canonical URL for the author (used as sameAs / author URL). */
+  url: 'https://learninghub.duthaho.dev',
+  /** X/Twitter @handle without the @, or '' to omit twitter:site/creator. */
+  twitter: '',
+};
+
+/** SEO defaults shared across pages. */
+export const seo = {
+  /** Default social-share image, resolved against the site's base URL. */
+  defaultImage: 'og-default.png',
+  /** OpenGraph locale. */
+  locale: 'en_US',
+  /** Theme colours for the browser UI (light / dark). */
+  themeLight: '#eef1f5',
+  themeDark: '#12171f',
+};
+
 export const support = {
   /** Turn the whole "Buy me a coffee" feature on/off. */
   enabled: true,

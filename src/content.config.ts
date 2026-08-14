@@ -15,6 +15,8 @@ const articles = defineCollection({
     accent: z.string().default('#5b3cc4'),
     readingTime: z.string(),
     updated: z.coerce.date(),
+    // Original publication date. Falls back to `updated` when omitted.
+    published: z.coerce.date().optional(),
     // Draft articles are excluded from the production build.
     draft: z.boolean().default(false),
     // Ordering on the homepage (lower = earlier).
