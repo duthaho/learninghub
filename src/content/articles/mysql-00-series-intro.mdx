@@ -1,0 +1,56 @@
+---
+title: "The MySQL series: start here"
+subtitle: "Nine short deep-dives that build one mental model of MySQL — from how InnoDB stores a row to the pitfalls that bite from application code."
+description: "A guide to the nine-part MySQL deep-dive series: what each part covers, who it's for, and the order to read them in."
+level: "Foundations · Series guide"
+accent: "#00758f"
+readingTime: "3 min read"
+updated: 2026-08-18
+order: 18
+series: "MySQL"
+part: 0
+---
+
+Most MySQL tutorials hand you a pile of syntax — `SELECT`, `JOIN`, `CREATE
+INDEX` — and hope a mental model assembles itself. This series does the opposite.
+It starts from **one idea — in InnoDB, the table *is* its primary-key index,
+sorted on disk and cached in RAM — and treats almost everything else as a
+consequence of it**: why the shape of your primary key changes write speed, why
+an index's column order decides which queries it helps, why a plain `SELECT`
+never blocks a writer, and why a deadlock is the database working correctly, not
+a bug you can delete.
+
+It's written for a **backend engineer who's comfortable with SQL but wants
+depth** — someone who can write a `JOIN` and now wants to design schemas that
+scale, read an `EXPLAIN` plan, reason about transactions and locking, migrate a
+live table without downtime, and stop the pitfalls that only show up under load.
+Every idea is hooked onto something you already know — an `orders` table, an API
+endpoint, an ORM — and every part ends with the one misconception that trips
+people up in production, not a wall of trivia.
+
+## The nine parts
+
+1. **[How InnoDB stores your rows](/mysql-01-how-innodb-stores-rows/)** — the clustered index, why the table is physically ordered by its primary key, and why a random UUID key quietly wrecks write performance.
+2. **[Data types as a design decision](/mysql-02-data-types/)** — `DECIMAL` vs `FLOAT` for money, sizing integers, `VARCHAR`/`CHAR`/`TEXT`, and the `DATETIME`-vs-`TIMESTAMP` (2038) trap — narrower rows, correct results.
+3. **[Indexes and the B-tree](/mysql-03-indexes-and-the-b-tree/)** — what a B-tree buys and costs, composite-index column order, the leftmost-prefix rule, and covering indexes that skip the row lookup entirely.
+4. **[Reading EXPLAIN](/mysql-04-reading-explain/)** — the access-type ladder (`const`→`ref`→`range`→`ALL`), `rows`/`filtered`, and the `Using index` / `Using filesort` / `Using temporary` phrases that tell you where the time goes.
+5. **[JOINs and the optimizer](/mysql-05-joins-and-the-optimizer/)** — nested-loop vs hash join, why the join column *on the probed table* must be indexed, and how the optimizer picks the driving table.
+6. **[Transactions and isolation levels](/mysql-06-transactions-and-isolation/)** — ACID, MySQL's default `REPEATABLE READ` vs `READ COMMITTED`, MVCC snapshots, and the read anomalies each level allows.
+7. **[Locking and deadlocks](/mysql-07-locking-and-deadlocks/)** — row, gap and next-key locks, `SELECT ... FOR UPDATE`, how a deadlock forms, and the lock-ordering and retry patterns that prevent them.
+8. **[Schema changes without downtime](/mysql-08-schema-changes/)** — foreign-key actions, online DDL (`INSTANT` / `INPLACE` / `COPY`), and how to add a column or index and backfill a large live table without locking it.
+9. **[MySQL from application code](/mysql-09-application-code/)** — connection pooling, the N+1 query, prepared statements, `utf8mb4`, JSON columns, and window functions & CTEs — the pitfalls an ORM hides from you.
+
+## How to read it
+
+Parts 1–3 are the foundation — how rows are stored, how to type them, and how
+indexes work. Don't skip them; the rest leans on them constantly. Parts 4–5 are
+the diagnostic core: reading query plans and understanding joins. Parts 6–7 shift
+from performance to **correctness under concurrency** — transactions and locking,
+the part backend bugs actually live in. Parts 8–9 are the operational and
+application judgment that turn "I can write a query" into "I can evolve a live
+schema and write DB code that survives production."
+
+> Everything version-sensitive here was checked against **MySQL 8.4 LTS**
+> (mid-2026); MySQL 8.0 reached end-of-life in April 2026, so 8.4 is the line to
+> target. The core concepts — InnoDB's clustered index, MVCC, the B-tree — are
+> stable across 8.x. Start with [Part 1](/mysql-01-how-innodb-stores-rows/).

@@ -1,0 +1,258 @@
+---
+title: "Reading EXPLAIN"
+subtitle: "Turn index theory into diagnosis: read a query plan, spot the full scan and the filesort, and prescribe the fix."
+description: "How to read MySQL EXPLAIN output: the access-type ladder, key/rows/filtered, and the Using index / Using filesort / Using temporary phrases — then diagnose and fix a slow query."
+level: "Core"
+accent: "#00758f"
+readingTime: "10 min read"
+updated: 2026-08-18
+order: 22
+series: "MySQL"
+part: 4
+---
+
+import Callout from '../../components/Callout.astro';
+
+*MySQL deep-dive · Part 4 of 9. Next: [JOINs and the optimizer](/mysql-05-joins-and-the-optimizer/).*
+
+In [Part 3](/mysql-03-indexes-and-the-b-tree/) you learned what an index *is* — a sorted B-tree
+that lets MySQL find rows without reading every one. That's the theory. `EXPLAIN`
+is where you find out whether the optimizer actually *used* the index you were
+counting on, or quietly ignored it and scanned the whole table anyway. It is the
+single most useful tool for turning "this query feels slow" into "here is exactly
+why, and here is the fix."
+
+The mental model to hold onto: **`EXPLAIN` shows you the optimizer's plan — the
+route it intends to take — before running the query.** You are reading a decision,
+not a result. Learn to read four or five columns and you can diagnose most slow
+queries in seconds, without ever seeing the data.
+
+## EXPLAIN vs EXPLAIN ANALYZE
+
+There are two commands, and the difference matters.
+
+`EXPLAIN` asks the optimizer, "if I gave you this query, how would you run it?" It
+returns the plan — access methods, chosen indexes, estimated row counts — **without
+executing anything.** It's instant and safe to run on production, because no rows
+are touched.
+
+`EXPLAIN ANALYZE` (available since 8.0.18) actually *runs* the query and reports
+what really happened: estimated rows versus actual rows, and timing per step. That
+gap between estimate and actual is gold — it's how you catch the optimizer being
+lied to by stale statistics. Reach for it when the plan looks fine but the query
+is still slow.
+
+```sql
+EXPLAIN
+SELECT id, total_amount FROM orders
+WHERE user_id = 42 AND status = 'paid'
+ORDER BY created_at DESC
+LIMIT 20;
+```
+
+Start with plain `EXPLAIN`. It answers most questions. Escalate to `EXPLAIN
+ANALYZE` when the plan and the reality disagree.
+
+## The columns that matter
+
+`EXPLAIN` returns a dozen columns. You'll live in five of them.
+
+### `type` — the access-method ladder
+
+This is the first thing to read, every time. `type` tells you *how* MySQL reaches
+the rows for a given table, and there's a clear ladder from best to worst:
+
+- **`const` / `system`** — at most one row, fetched via a primary key or unique
+  index against a constant. As fast as it gets.
+- **`eq_ref`** — one row per driving row, via a PK or unique key. The gold standard
+  inside a join.
+- **`ref`** — an index lookup on a non-unique key that may return several matching
+  rows. This is what you want for a normal filtered query.
+- **`range`** — an index range scan: `>`, `<`, `BETWEEN`, `IN (...)`, `LIKE 'x%'`.
+  Reads a contiguous slice of the index. Perfectly healthy.
+- **`index`** — a full scan of the *index* tree (every entry, in order). Cheaper
+  than reading the table, but it's still reading everything.
+- **`ALL`** — a full *table* scan. Every row, from disk or buffer pool. On a big
+  table this is the red flag.
+
+You're aiming for `const`, `eq_ref`, `ref`, or `range`. Seeing `ALL` on a table
+with millions of rows is the loudest signal in the whole output.
+
+<Callout type="insight" title="Read type first, then key">
+  Ninety percent of diagnosis is those two columns. `type` tells you the shape of
+  the access; `key` tells you which index made it possible. If `type` is `ALL` and
+  `key` is `NULL`, you already know the story before reading anything else: no
+  index is being used, and MySQL is walking the whole table.
+</Callout>
+
+### `key` and `possible_keys`
+
+`possible_keys` lists the indexes the optimizer *considered*. `key` is the one it
+actually *chose*. When `key` is `NULL`, no index is in play — and you should expect
+`type: ALL` right next to it.
+
+The revealing case is when `possible_keys` names a perfectly good index but `key`
+is still `NULL`. That's not a missing index — it's the optimizer looking at your
+index, judging it not selective or usable enough for this query, and deciding a
+full scan is cheaper. Sometimes it's right (the filter matches most of the table).
+Sometimes it's been misled by stale statistics. Either way, an index in
+`possible_keys` with `key = NULL` is a specific diagnosis, not a mystery.
+
+### `rows` and `filtered`
+
+`rows` is the number of rows MySQL **estimates** it will examine at this step. Two
+things about that word *estimate*: it comes from table statistics, not a real
+count, and it's **per step**, not the number of rows your query returns.
+
+`filtered` is the percentage of those examined rows expected to survive the `WHERE`
+clause. High `rows` with low `filtered` is a quiet warning: MySQL expects to read a
+lot of rows and throw most of them away. That's work you're paying for and not
+using — usually a sign the index isn't narrowing things down.
+
+<Callout type="gotcha" title="'rows is how many rows my query returns'">
+  It isn't. `rows` is a **per-step estimate drawn from statistics** — how many rows
+  the optimizer *thinks* it will examine at that stage, not the final result count
+  and not an exact figure. When statistics are stale (after a big bulk load or
+  mass delete), the estimate can be wildly wrong. `EXPLAIN ANALYZE` exposes the gap
+  by showing estimated *and* actual side by side; `ANALYZE TABLE orders` refreshes
+  the statistics so the estimate lines up with reality again.
+</Callout>
+
+### `key_len`
+
+`key_len` is how many bytes of a composite index were actually used. This is the
+column that lets you *verify* the leftmost-prefix rule from Part 3 in practice. If
+you built `INDEX(user_id, status, created_at)` and expected all three parts to be
+used, `key_len` tells you the truth: if it's smaller than the sum of those three
+columns' byte widths, MySQL stopped partway down the index. It's the difference
+between "I think this index is fully used" and "I can see it is."
+
+### `Extra` — the phrases that tell the real story
+
+The `Extra` column is where the sorting and materialization costs hide. The four
+phrases worth memorizing:
+
+- **`Using index`** ✅ — a *covering* index. Everything the query needs is in the
+  index itself, so MySQL never does a bookmark lookup back into the table. This is
+  the best thing you can see here.
+- **`Using where`** — rows were filtered *after* being read. Normal on its own, but
+  paired with high `rows` and low `filtered` it signals weak narrowing.
+- **`Using filesort`** ⚠️ — MySQL must sort the rows after fetching them, because
+  the `ORDER BY` isn't served by an index. Note: "filesort" does *not* mean "on
+  disk" — small sorts happen in memory. It still means work an index could have
+  avoided.
+- **`Using temporary`** ⚠️ — an internal temporary table was built to process the
+  query, common with `GROUP BY` and `ORDER BY` on different columns, or `DISTINCT`.
+  It's often the single most expensive line in the plan.
+
+## The worked example: diagnosing a slow query
+
+Here's the query. We want a user's 20 most recent paid orders:
+
+```sql
+SELECT id, total_amount FROM orders
+WHERE user_id = 42 AND status = 'paid'
+ORDER BY created_at DESC
+LIMIT 20;
+```
+
+The `orders` table has 2.1 million rows and, to start, only a primary key on `id`.
+Run `EXPLAIN` and read the plan:
+
+```
++----+-------------+--------+------+---------------+------+---------+------+---------+----------+-----------------------------+
+| id | select_type | table  | type | possible_keys | key  | key_len | ref  | rows    | filtered | Extra                       |
++----+-------------+--------+------+---------------+------+---------+------+---------+----------+-----------------------------+
+|  1 | SIMPLE      | orders | ALL  | NULL          | NULL | NULL    | NULL | 2100000 |     5.00 | Using where; Using filesort |
++----+-------------+--------+------+---------------+------+---------+------+---------+----------+-----------------------------+
+```
+
+Read it top to bottom. `type: ALL` — full table scan. `key: NULL` — no index; in
+fact `possible_keys` is `NULL` too, so the optimizer had nothing to consider.
+`rows: 2100000` — it expects to examine every row in the table. `filtered: 5.00` —
+and keep about 5% of them. Then `Extra: Using where; Using filesort` — it filters
+after reading, then sorts the survivors by `created_at` because nothing gives it
+that order for free.
+
+That single line is a complete diagnosis. MySQL is reading 2.1 million rows to
+return 20, then sorting them, on every request. This query gets slower as the table
+grows, and it's blocking buffer pool space the whole time.
+
+### Prescribe the index
+
+The fix follows directly from the query shape. Equality filters come first
+(`user_id`, `status`), then the sort column (`created_at`), and finally the columns
+we `SELECT` so the index can *cover* the query:
+
+```sql
+CREATE INDEX idx_orders_user_status_created
+  ON orders (user_id, status, created_at, total_amount);
+```
+
+The order isn't arbitrary. Equality columns lead so MySQL can seek straight to the
+`user_id = 42 AND status = 'paid'` slice. `created_at` comes next so that slice is
+*already sorted* — no filesort needed. And `total_amount` rides along at the end
+(with `id` implicitly present, since it's the primary key) so every column the
+query reads lives in the index — no trip back to the table.
+
+### Confirm the fix
+
+Run `EXPLAIN` again:
+
+```
++----+-------------+--------+------+-------------------------------+-------------------------------+---------+-------------+------+----------+-------------+
+| id | select_type | table  | type | possible_keys                 | key                           | key_len | ref         | rows | filtered | Extra       |
++----+-------------+--------+------+-------------------------------+-------------------------------+---------+-------------+------+----------+-------------+
+|  1 | SIMPLE      | orders | ref  | idx_orders_user_status_created| idx_orders_user_status_created| 156     | const,const |   23 |   100.00 | Using index |
++----+-------------+--------+------+-------------------------------+-------------------------------+---------+-------------+------+----------+-------------+
+```
+
+Read the same columns and watch every one improve. `type: ref` — an index lookup,
+up several rungs from `ALL`. `key` names our new index. `rows: 23` — it now expects
+to examine about 23 rows, not 2.1 million. `filtered: 100.00` — every row it reads
+survives the `WHERE`, because the index found exactly the right slice. And
+`Extra: Using index` — the filesort is *gone* (the index supplied the sort order)
+and it's a covering index (no bookmark lookup). Same query, same result, roughly
+five orders of magnitude less work.
+
+<Callout type="note" title="The diagnostic loop, in one breath">
+  Spot the trouble (`type: ALL`, or a `Using filesort` / `Using temporary` you
+  didn't expect) → prescribe an index that matches the query's filter-then-sort
+  shape → confirm you landed on `ref`/`range` with the filesort gone and, ideally,
+  `Using index`. That loop covers the large majority of single-table slow queries.
+</Callout>
+
+## When a filesort refuses to leave
+
+Sometimes you add the right index, `type` improves to `ref` or `range` — and
+`Using filesort` is *still* there. It's tempting to blame stale statistics and run
+`ANALYZE TABLE`. Don't. A filesort that persists even though an index is being used
+for the filter is a **structural** problem, not a statistics one.
+
+The usual causes:
+
+- A **multi-value `IN` or a range** on the filter column. `WHERE user_id IN (42,
+  99)` produces two separately-ordered runs of `created_at` that must be merged —
+  each slice is sorted, but their concatenation isn't.
+- A **function or expression on the sort column**, like `ORDER BY DATE(created_at)`.
+  The index stores `created_at`, not `DATE(created_at)`, so it can't supply the
+  order.
+- A **direction mismatch** between the index and a mixed-direction `ORDER BY` that
+  the index definition doesn't match.
+
+The fix is to change the query or the index definition — not to refresh statistics.
+Recognizing the difference saves you from running `ANALYZE TABLE` and staring,
+puzzled, when the filesort stubbornly remains.
+
+## Where this goes next
+
+Everything here was a *single* table. Real queries join. The moment you add a
+second table, `EXPLAIN` returns a row per table, in the order the optimizer chose
+to join them — and `type: eq_ref` versus `ref` versus `ALL` on the *inner* table
+becomes the thing that makes or breaks the query. That's [Part 5](/mysql-05-joins-and-the-optimizer/):
+JOINs and the optimizer, where the same columns you just learned to read tell a
+richer, multi-line story.
+
+> If you can look at one `EXPLAIN` line and say "full scan, filesort, here's the
+> index that fixes it" — and then read the next line and confirm `ref` plus
+> `Using index` — you can diagnose most slow queries faster than you can run them.

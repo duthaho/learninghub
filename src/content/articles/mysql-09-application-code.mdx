@@ -1,0 +1,304 @@
+---
+title: "MySQL from application code"
+subtitle: "The pitfalls an ORM hides: N+1 queries, unpooled connections, string-built SQL, and the utf8 that can't store emoji."
+description: "The application-side MySQL pitfalls that only show up under load: connection pooling, the N+1 query, prepared statements, utf8mb4, JSON columns, and window functions & CTEs."
+level: "Application"
+accent: "#00758f"
+readingTime: "11 min read"
+updated: 2026-08-18
+order: 27
+series: "MySQL"
+part: 9
+---
+
+import Callout from '../../components/Callout.astro';
+
+Every earlier part of this series lived inside the database: how InnoDB stores a
+row, how a B-tree turns a `WHERE` into a seek, how `EXPLAIN` reveals the
+optimizer's plan, how MVCC gives each transaction its own snapshot. This
+capstone crosses the wire. It's about the code that *talks* to MySQL — usually
+through an ORM — and the six ways that code quietly betrays everything the
+database is trying to do for you.
+
+The through-line: **none of these pitfalls show up on your laptop.** A single
+developer, a hundred rows, one request at a time — everything is instant. They
+surface under load, in production, at 2 a.m. So we'll build the mental model for
+each one *before* it bites, not after.
+
+## 1. Connection pooling: reuse the expensive thing
+
+Opening a MySQL connection is not free. Behind that one call sits a TCP
+handshake, authentication, and session setup — often **1–5 milliseconds**. That
+sounds tiny until you compare it to the thing you're actually trying to do: a
+fast, indexed query ([Part 3](/mysql-03-indexes-and-the-b-tree/)) can return in
+well under a millisecond. Open a fresh connection per request and the *setup*
+dwarfs the *work*. Under real traffic it gets worse: every concurrent request
+races to open its own connection, and you slam into `max_connections` (151 by
+default) and start throwing errors.
+
+A **connection pool** fixes this. It opens a fixed set of live connections once,
+keeps them warm, and hands one out when your code needs it — then takes it back
+when you're done. The expensive setup happens N times at startup, not once per
+request.
+
+Two pitfalls turn a pool from a fix into a fresh source of outages:
+
+- **Size it to the database, not to your ambition.** The pool lives in your app
+  process, but the connections land on the DB. Ten app servers, each with a pool
+  of 100, means **1000 connections** pointed at a server with
+  `max_connections=151`. The database refuses them and your "fix" becomes the
+  outage. A useful starting point: `pool ≈ effective_cores × 2` on the *DB*
+  side, summed across all app servers — not "as many as possible." Past the core
+  count, extra connections don't add throughput; they add contention, more
+  work fighting over the same CPUs.
+- **Always return the connection.** A pool works only if borrowed connections
+  come back. Forget to release one — an exception path that skips your cleanup,
+  a `with`/`finally` you didn't wrap — and that connection is gone from the pool
+  *permanently*. Leak them one at a time and the pool slowly starves until every
+  request blocks waiting for a connection that will never return.
+
+<Callout type="insight" title="More connections is not more throughput">
+  The instinct is "we're slow, give the pool more connections." But a MySQL
+  server has a fixed number of cores, and it can only truly run that many queries
+  at once. Connections beyond that don't run in parallel — they queue and fight
+  for CPU. The sizing rule `cores × 2` isn't stinginess; past that point you're
+  paying context-switching and lock contention to go *slower*.
+</Callout>
+
+## 2. The N+1 query: death by round-trips
+
+This is the most common performance bug in ORM-backed applications, and it's
+nearly invisible because every individual query is fast.
+
+You fetch a list — say, all active users. That's **1** query. Then you loop over
+them and, for each one, fetch something related — their latest order. That's
+**N** more queries. Total: **1 + N** round-trips to the database. With 500 active
+users, that's 501 separate conversations across the network, each paying the
+latency tax of a round-trip.
+
+Here's the trap in Python-flavored ORM pseudocode:
+
+```python
+users = User.objects.filter(active=True)   # 1 query
+for user in users:
+    latest = user.orders.order_by("-created_at").first()  # +1 query, EACH loop
+    print(user.name, latest.total)
+```
+
+That `user.orders` looks like plain attribute access. It reads like touching a
+field already in memory. It is actually a database round-trip, fired once per
+iteration. The ORM's *lazy loading* makes the expensive thing look free.
+
+<Callout type="gotcha" title="EXPLAIN will not catch an N+1">
+  Every query in an N+1 is trivially fast — a single indexed lookup that
+  [EXPLAIN](/mysql-04-reading-explain/) rates as excellent. The problem isn't any
+  one query's *plan*; it's the *count* of queries and the network latency
+  summed across all of them. `EXPLAIN` inspects one statement at a time, so it's
+  structurally blind to this. The tool that catches an N+1 is a **query counter**
+  on the request, not the optimizer.
+</Callout>
+
+The fix is to collapse `1 + N` into `1 + 1`, or better, into **1**. Either eager-load
+the relation (one `JOIN`, or a second query with a batched `IN (...)` — in ORMs
+this is "eager loading" / `includes` / `select_related` / `prefetch_related`), or
+write the query yourself. We'll write it yourself in a moment, because it also
+shows off the last pitfall.
+
+## 3. Prepared statements: the mechanism is separation, not escaping
+
+Never build SQL by gluing strings together:
+
+```python
+# NEVER do this
+query = f"SELECT * FROM users WHERE email = '{email}'"
+```
+
+Feed that an `email` of `' OR '1'='1' --` and the query becomes
+`... WHERE email = '' OR '1'='1' --'`, which matches every row and dumps your
+table. That's SQL injection, and string concatenation is how it gets in.
+
+The fix is a **prepared statement** — but it's worth being precise about *why* it
+works, because the usual explanation ("it escapes the input") is wrong and the
+real reason is the whole point:
+
+```python
+# The parameter is data, never code
+cursor.execute("SELECT * FROM users WHERE email = %s", (email,))
+```
+
+A prepared statement sends the SQL **template** and the **parameters** to the
+server as *separate things*. The server parses the template — deciding what is a
+keyword, what is a column, where the value slots in — *before* it ever sees your
+input. When your input arrives, the query's structure is already fixed. The
+parameter can only ever be **a value**; it cannot become a keyword, a new clause,
+or a second statement, no matter what characters it contains. `' OR '1'='1' --`
+is simply searched for as a literal email address that happens to contain those
+characters, and matches nothing.
+
+<Callout type="insight" title="Code and data on separate wires">
+  Injection is a confusion between code and data — user input being *interpreted*
+  as SQL. Escaping tries to sanitize the data so it's safe to paste into code;
+  it's a blocklist, and blocklists leak. Prepared statements never paste at all.
+  Code and data travel on separate rails and the parameter never gets a vote on
+  the query's structure. That's why it's airtight where escaping is merely
+  careful. (Bonus: the server can cache the parsed plan for a reused template.)
+</Callout>
+
+This is the one pitfall an ORM genuinely handles for you: it parameterizes by
+default. Every query you express through the ORM's query builder is a prepared
+statement under the hood. The danger returns the moment you drop to raw SQL and
+f-string a value into it "just this once."
+
+## 4. utf8mb4, because `utf8` can't store an emoji
+
+This one is a landmine buried in MySQL's own history. MySQL's `utf8` is **not**
+real UTF-8. It's an alias for `utf8mb3`, a three-*byte* subset of the encoding
+that predates full Unicode support. Three bytes cannot hold a four-byte
+character — which means every emoji, plenty of CJK characters, and various
+symbols simply don't fit. Insert `"😀"` into a `utf8`/`utf8mb3` column and MySQL
+either errors or silently truncates the string at the bad byte.
+
+The fix is **`utf8mb4`**, the real four-byte UTF-8, and you need it in four
+places: the **column**, the **table**, the **connection**, and the **client**.
+
+```sql
+CREATE TABLE messages (
+  id     BIGINT PRIMARY KEY AUTO_INCREMENT,
+  body   TEXT NOT NULL
+) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
+```
+
+<Callout type="gotcha" title="The connection charset bites even on a modern DB">
+  MySQL 8.0+ *defaults* to `utf8mb4` (collation `utf8mb4_0900_ai_ci`), so a
+  freshly created database is usually fine on the storage side. But two things
+  still bite: **legacy tables** migrated from older versions keep their old
+  charset, and the **connection charset** is negotiated separately by your driver.
+  A perfect `utf8mb4` table still mangles emoji if the client connects as `utf8`.
+  Verify the connection, not just the schema — check what your driver actually
+  sets, or force `charset=utf8mb4` in the connection config.
+</Callout>
+
+## 5. JSON columns: for the genuinely variable, not the queryable
+
+MySQL has a native `JSON` type. It validates the document on insert, and it comes
+with real tooling — `JSON_EXTRACT`, the `->` operator, and `->>` which also
+unquotes the result. You can even index a value inside a JSON document by
+extracting it into a **generated column** and indexing that.
+
+Used well, it's excellent: genuinely schemaless or variable-shaped data —
+per-integration settings, a grab-bag of optional metadata, a third party's
+webhook payload — that you store and read back whole.
+
+The misuse is stuffing **structured, queryable** fields into JSON because it felt
+flexible at the time. If you filter, sort, or constrain on a field, it belongs in
+a **typed column**, not inside a JSON blob:
+
+```sql
+-- Misuse: status is a first-class thing you filter on
+SELECT * FROM orders WHERE data->>'$.status' = 'paid';
+```
+
+That query can't use an ordinary index (you'd have to build a generated-column
+index just to make it seekable — see [Part 3](/mysql-03-indexes-and-the-b-tree/)),
+it loses type safety (everything comes back as text), and it bloats every row
+with repeated JSON keys. The rule is simple:
+
+> **Typed columns for what you query and constrain; JSON for the genuinely
+> variable rest.**
+
+## 6. Window functions & CTEs: reporting without the round-trips
+
+MySQL 8.0 added two features that let you push multi-step, analytical work *into*
+one query instead of dragging rows back to the app and computing there.
+
+**CTEs** (`WITH ...`) name a subquery so a multi-step query reads top to bottom
+instead of nesting inside-out; they can even be recursive, for trees and
+hierarchies. **Window functions** compute across a set of rows *without*
+collapsing them — the crucial difference from `GROUP BY`. `GROUP BY` gives you
+one row per group; a window function keeps every row and adds a computed column
+alongside it: running totals, rankings, and — the classic —
+**top-N-per-group**.
+
+### Worked example: the N+1 from Part 2, killed
+
+Recall the N+1: fetch active users, then per user fetch their latest order. Even
+the batched-`IN` fix still pulls all a user's orders back to filter in app code.
+A window function does the whole job in one statement:
+
+```sql
+WITH ranked AS (
+  SELECT
+    o.*,
+    ROW_NUMBER() OVER (
+      PARTITION BY user_id
+      ORDER BY created_at DESC
+    ) AS rn
+  FROM orders o
+)
+SELECT * FROM ranked WHERE rn = 1;
+```
+
+`ROW_NUMBER()` numbers each user's orders newest-first, restarting the count for
+every `user_id` (that's the `PARTITION BY`). Keep only `rn = 1` and you have each
+user's single latest order — 501 round-trips collapsed to **one**.
+
+And now every earlier part of this series pays off at once:
+
+- It wants **`INDEX(user_id, created_at)`** so the `PARTITION BY ... ORDER BY`
+  reads rows already in order. That's the composite-index, left-to-right
+  reasoning from [Part 3](/mysql-03-indexes-and-the-b-tree/).
+- You **confirm** the index is doing its job by running
+  [`EXPLAIN`](/mysql-04-reading-explain/) and checking there's no
+  `Using filesort` — if MySQL is sorting in memory, your index isn't being used
+  for the window's order.
+- The whole query reads from a single **MVCC snapshot**
+  ([Part 6](/mysql-06-transactions-and-isolation/)): every row it sees is
+  consistent as of one point in time, so the ranking can't be corrupted by
+  another transaction inserting an order midway through.
+
+Three earlier chapters, one query. That's the payoff of understanding the engine
+under the ORM.
+
+## The misconception to bust: "my ORM protects me from all this"
+
+It doesn't. Here's the honest ledger of what an ORM does and doesn't do:
+
+- **Gives you for free:** prepared statements. Parameterization is on by default,
+  so pitfall #3 is handled — right up until you drop to raw SQL.
+- **Actively encourages the worst one:** the N+1. Lazy loading is *designed* to
+  look like attribute access (`user.orders`), which is exactly what hides the
+  round-trips. The abstraction that makes the ORM pleasant is the one that breeds
+  the bug.
+- **Hides the signal:** query counts. The ORM doesn't tell you a single page
+  view fired 500 queries unless you go looking with a counter or query log.
+- **Picks defaults you didn't verify:** the connection charset (#4), the pool
+  size (#1) — chosen by the library or left at a default that's wrong for your
+  topology.
+- **Generates SQL that can ignore your indexes:** the ORM emits *some* valid SQL,
+  not necessarily the one that hits your composite index or avoids a filesort.
+
+So the working posture for using MySQL from application code is not "trust the
+ORM." It's: **watch the query count on every request, read the SQL the ORM
+actually generates, and `EXPLAIN` the hot paths.** The ORM is a convenience over
+the database, never a replacement for understanding it.
+
+## Where this leaves the series
+
+We started at the bytes on disk and ended at the code across the wire, and the
+same theme ran the whole way: MySQL rewards you for knowing what it's doing
+underneath. The B-tree ([Part 3](/mysql-03-indexes-and-the-b-tree/)) only helps
+if your query lets it; `EXPLAIN` ([Part 4](/mysql-04-reading-explain/)) is how
+you check; MVCC ([Part 6](/mysql-06-transactions-and-isolation/)) is why your
+reads are consistent. The application layer is where all of that either pays off
+or gets thrown away — an N+1 wastes a perfect index, an unverified charset
+corrupts a perfect schema, a leaked connection starves a perfectly sized pool.
+
+> If you can spot an N+1 in a screenful of ORM code, explain why a prepared
+> statement beats escaping, and reach for a window function instead of a loop,
+> you're writing application code that works *with* the database instead of
+> against it.
+
+That's the whole series. To retrace any thread from the top, head back to the
+[series guide](/mysql-00-series-intro/).
+
+*MySQL deep-dive · Part 9 of 9. Back to the [series guide](/mysql-00-series-intro/).*

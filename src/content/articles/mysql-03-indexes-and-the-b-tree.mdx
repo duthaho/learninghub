@@ -1,0 +1,234 @@
+---
+title: "Indexes and the B-tree"
+subtitle: "Why a composite index's column order decides which queries it helps — and how a covering index skips the row lookup entirely."
+description: "How MySQL B-tree indexes really work: what they cost and buy, composite-index column order, the leftmost-prefix rule, the range-column rule, and covering indexes."
+level: "Core"
+accent: "#00758f"
+readingTime: "11 min read"
+updated: 2026-08-18
+order: 21
+series: "MySQL"
+part: 3
+---
+
+import Callout from '../../components/Callout.astro';
+
+*MySQL deep-dive · Part 3 of 9. Next: [Reading EXPLAIN](/mysql-04-reading-explain/).*
+
+Most people treat indexes as a dial you turn when a query gets slow: add one, the
+query speeds up, done. That works often enough to be dangerous, because it hides
+the one idea that decides *whether* an index helps a given query at all. An index
+is a **sorted copy of some columns, kept in a B-tree, pointing back at the row.**
+Hold onto that sentence. The leftmost-prefix rule, the range-column rule, and the
+covering-index trick all fall out of "it's sorted, and it points back."
+
+We'll keep the examples on the two tables you already know from
+[Part 1](/mysql-01-how-innodb-stores-rows/): a `users` table and an `orders` table, with
+`orders` carrying `user_id`, `status`, `created_at`, and `total_amount`.
+
+## What a B-tree buys, and what it costs
+
+Recall the shape from Part 1: the primary key is a **clustered** B-tree whose
+leaves hold the *full rows*, and every secondary index is a *separate* B-tree
+whose leaves hold `(indexed columns → primary key)`. That "→ primary key" is the
+back-pointer — the bookmark MySQL follows to fetch the rest of the row.
+
+The reason a B-tree is worth building is that it keeps every entry **sorted**.
+Sorted data can be binary-searched: instead of scanning a million rows to find
+one, MySQL walks down the tree in roughly **3–4 page reads** and lands on the
+entry. That single property makes three very different things fast:
+
+- **Equality** — `WHERE status = 'paid'` seeks straight to the `'paid'` entries.
+- **Ranges** — `WHERE created_at > '2026-01-01'` seeks to the start and reads
+  forward, because everything after it is already in order.
+- **Sorted retrieval** — `ORDER BY created_at` can read the index in order and
+  skip sorting entirely.
+
+None of that is free. Every index is a **second tree that must be updated on every
+`INSERT`, `UPDATE`, and `DELETE`** that touches its columns, and it takes disk and
+memory. An index is a *write-tax you pay to speed up reads.* That framing settles
+most "should I add this index?" arguments: add one when the read it accelerates
+matters more than the writes it slows down — and not reflexively.
+
+<Callout type="insight" title="Sorted is the whole trick">
+  Everything an index does well — equality seeks, range scans, ordered reads —
+  is a consequence of one fact: the entries are kept in sorted order. Everything
+  it does badly is a consequence of the same fact: keeping that order sorted on
+  every write costs you. If you remember "an index is sorted, and staying sorted
+  isn't free," you can predict most of its behavior without memorising rules.
+</Callout>
+
+## Composite indexes: it's a phone book
+
+A composite index over several columns, `INDEX(a, b, c)`, does not sort by three
+things independently. It sorts by `a` first; then by `b` *within* rows that share
+the same `a`; then by `c` *within* rows that share the same `(a, b)`. It's a
+**phone book ordered by (last name, first name)**: everyone named *Nguyen* is
+grouped together, and inside that group they're ordered by first name.
+
+That single ordering is the key to everything that follows. A phone book is
+brilliant for "find Nguyen" and "find Nguyen, Anh." It is useless for "find
+everyone named Anh" — first names are scattered across every page, because the
+book was never sorted by first name at all. Composite indexes have exactly this
+shape, and the next two rules are just this analogy made precise.
+
+## The leftmost-prefix rule
+
+An index can only help a query for a **contiguous prefix starting from its
+leftmost column.** Given `INDEX(a, b, c)`:
+
+```sql
+WHERE a = ?                    -- ✅ uses (a)
+WHERE a = ? AND b = ?          -- ✅ uses (a, b)
+WHERE a = ? AND b = ? AND c = ? -- ✅ uses (a, b, c)
+WHERE a = ? AND c = ?          -- ⚠️ uses (a) only; c can't seek, b was skipped
+WHERE b = ?                    -- ❌ can't use the index at all
+```
+
+The `a = ? AND c = ?` case is the subtle one. MySQL happily uses the `a` part of
+the index to seek, but once you skip `b`, it can't use `c` for seeking — the
+entries within a given `a` are ordered by `b`, and `c` only has meaning *inside*
+a fixed `b`. So `c` becomes a filter applied to whatever rows the `a` seek
+returned, not a seek of its own.
+
+The `WHERE b = ?` case is the phone-book "find everyone named Anh": the column
+isn't the leftmost, so there's no contiguous prefix to stand on, and the index is
+skipped entirely. MySQL falls back to a full scan (or a different index).
+
+<Callout type="gotcha" title="Column order is not cosmetic">
+  `INDEX(a, b)` and `INDEX(b, a)` are *different indexes* that help *different*
+  queries. The first serves `WHERE a = ?` and `WHERE a = ? AND b = ?`; the second
+  serves `WHERE b = ?` and `WHERE b = ? AND a = ?`. Neither helps a bare query on
+  its second column. Reordering the columns in an index definition changes which
+  queries it can serve — treat the order as part of the design, not a detail.
+</Callout>
+
+## The range-column rule
+
+Here's the rule that most often explains a "why isn't my index being used?"
+mystery: **a range condition stops the prefix.** A range is anything that matches
+a span rather than a point — `<`, `>`, `BETWEEN`, `IN (...)`, and prefix `LIKE
+'x%'`. Once the index seeks on a range column, the columns *after* it can no
+longer be used for further seeking.
+
+The reason is, again, the sort order. Inside a *single* value of a column, the
+next column is neatly ordered. But across a *range* of values, the next column is
+scattered — just like first names across a range of surnames. So the practical
+rule writes itself: **put equality columns first and the range column last.**
+
+Concretely, for `WHERE status = 'paid' AND created_at > '2026-01-01'`:
+
+```sql
+INDEX(status, created_at)  -- ✅ seek to status='paid', then range-scan created_at
+INDEX(created_at, status)  -- ⚠️ range on created_at first; status can't seek
+```
+
+With `INDEX(status, created_at)`, MySQL seeks to the `'paid'` block — where the
+entries are in `created_at` order — and range-scans forward from the date. Both
+conditions are served by the index. With `INDEX(created_at, status)`, the range on
+`created_at` comes first and consumes the prefix; `status` is left as a filter over
+every dated row in the range, not a seek. Same two columns, opposite outcome —
+entirely because of which one is the range.
+
+## Covering indexes: skip the bookmark lookup
+
+Now recall the back-pointer. Normally a secondary index gets you to the matching
+entries, and then MySQL follows the primary key on each entry back into the
+clustered index to fetch the columns you actually asked for — the **bookmark
+lookup** from [Part 1](/mysql-01-how-innodb-stores-rows/). That's a second B-tree
+traversal *per row*, and on a hot query returning many rows it dominates the cost.
+
+A **covering index** eliminates it. If the index already contains *every column
+the query touches* — everything in the `SELECT`, the `WHERE`, and the `ORDER BY` —
+then MySQL can answer the whole query **from the index B-tree alone** and never
+touch the clustered index. No bookmark lookups, no second traversal. In `EXPLAIN`
+you'll see the tell-tale note **`Using index`** (which [Part
+4](/mysql-04-reading-explain/) walks through in detail).
+
+<Callout type="note" title="The primary key rides along for free">
+  Remember that every secondary-index leaf already stores the primary key as its
+  back-pointer. That means the PK columns are *always* available for covering,
+  even when you didn't list them in the index. `INDEX(status)` on a table with
+  PK `id` can cover `SELECT id FROM orders WHERE status = 'paid'` — `id` is in the
+  leaf whether you asked for it or not.
+</Callout>
+
+## Worked example: designing one index for a hot query
+
+Say this query runs thousands of times a minute — a user opening their recent
+orders page:
+
+```sql
+SELECT id, total_amount
+FROM orders
+WHERE user_id = ? AND status = 'paid'
+ORDER BY created_at DESC
+LIMIT 20;
+```
+
+Let's design one index for it, applying every rule above in order.
+
+**Equality columns first.** Two equality conditions: `user_id = ?` and `status =
+'paid'`. Both belong at the front of the index so we can seek straight to the
+matching block. That's `INDEX(user_id, status, ...)`.
+
+**The `ORDER BY` column next.** We want the 20 newest, ordered by `created_at
+DESC`. If `created_at` follows the two equality columns, then *within* a fixed
+`(user_id, status)` the entries are already in `created_at` order — so MySQL reads
+them in order and stops after 20. No sort step, no **filesort**. This is the
+range-column rule doing double duty: the ordering column sits right after the
+equalities, so the prefix carries us straight into sorted output.
+
+**Cover the rest.** The query also selects `total_amount`. Add it as the final
+column and the index now holds every column the query needs: `user_id` and
+`status` (WHERE), `created_at` (ORDER BY), `total_amount` (SELECT), and `id` —
+which rides along as the PK back-pointer. The design:
+
+```sql
+CREATE INDEX idx_orders_user_status_created
+  ON orders (user_id, status, created_at, total_amount);
+```
+
+Trace it end to end. MySQL seeks to the `(user_id = ?, status = 'paid')` block in
+about 3–4 page reads, reads entries backward in `created_at` order, takes the
+first 20, and reads `total_amount` and `id` straight out of each index entry. **No
+bookmark lookups, no filesort.** `EXPLAIN` will show `Using index` — the whole hot
+query answered from a single B-tree. That's the difference between a query that
+scales with your busiest user's order history and one that returns in constant
+time.
+
+## The "three single-column indexes" trap
+
+The most common indexing mistake is to look at a three-column `WHERE` and add
+three indexes — `INDEX(user_id)`, `INDEX(status)`, `INDEX(created_at)` — expecting
+MySQL to use all three at once. It almost never does. **MySQL generally uses one
+index per table access.** There *is* a feature called index merge that can combine
+two, but it's weaker and frequently not chosen by the optimizer. One well-ordered
+composite index beats three single-column indexes for a multi-column query, every
+time — it's the difference between a phone book and three separate lists sorted by
+different fields.
+
+<Callout type="gotcha" title="A prefix already covers its sub-queries — but only its prefix">
+  `INDEX(a, b, c)` already serves queries on `a` alone and on `(a, b)` — those are
+  its leftmost prefixes. So keeping a *separate* `INDEX(a)` alongside it is
+  redundant write-tax: it speeds up nothing the composite doesn't already handle,
+  while still costing you on every write. Drop it. But the same logic does **not**
+  make `INDEX(b)` redundant — `b` is not a leftmost prefix of `(a, b, c)`, so a
+  bare `WHERE b = ?` gets no help from the composite and may genuinely need its
+  own index.
+</Callout>
+
+So the two things to carry into `EXPLAIN`:
+
+- **One composite index, ordered equality-first, range/ORDER-BY last, covering
+  columns appended** — that's the shape that serves a real query end to end.
+- **Prune redundant indexes** whose columns are already a leftmost prefix of a
+  wider one, but don't over-prune: only *prefixes* are redundant.
+
+Next, we stop reasoning about indexes on paper and ask MySQL to show its work:
+[reading `EXPLAIN`](/mysql-04-reading-explain/) confirms which index a query
+actually used, whether it covered, and whether it sorted.
+
+> If you can explain why `INDEX(status, created_at)` helps a date-range query but
+> `INDEX(created_at, status)` doesn't — and why one composite beats three singles —
+> you can design an index before you ever run `EXPLAIN`, instead of guessing.

@@ -1,0 +1,226 @@
+---
+title: "JOINs and the optimizer"
+subtitle: "A join is a loop or a hash — and which one you get, plus which table drives, is decided by your indexes."
+description: "How MySQL executes joins: the nested-loop algorithm, why the join column on the probed table must be indexed, hash join in 8.x, and how the optimizer picks the driving table."
+level: "Core"
+accent: "#00758f"
+readingTime: "10 min read"
+updated: 2026-08-18
+order: 23
+series: "MySQL"
+part: 5
+---
+
+import Callout from '../../components/Callout.astro';
+
+*MySQL deep-dive · Part 5 of 9. Next: [Transactions and isolation levels](/mysql-06-transactions-and-isolation/).*
+
+The word "join" makes it sound like MySQL fuses two tables into one in some clever
+set-theoretic move. It doesn't. Underneath, a join is one of two very ordinary
+algorithms: **a nested loop, or a hash table.** Once you can picture which one is
+running — and, for the loop, *which table is on the outside* — the difference
+between a join that returns in a millisecond and one that hangs for thirty seconds
+stops being mysterious. It's almost always the same story: a loop that should be
+doing indexed seeks is doing full scans instead.
+
+We'll use two tables you can hold in your head: `orders` (millions of rows) and
+`users` (hundreds of thousands), joined on `orders.user_id = users.id`.
+
+## The default: a nested loop
+
+Here is the whole nested-loop algorithm, and it is exactly as dumb as it sounds.
+The optimizer picks one table to be the **driving** (outer) table. It reads that
+table's qualifying rows — the ones surviving its `WHERE` filter — and then, **for
+each one**, it goes and probes the other **inner** table looking for matching rows.
+The inner lookup runs once per driving row. There is no magic; it is a `for` loop
+with a lookup in the body.
+
+```sql
+-- conceptually, this is what MySQL does:
+for each row O in orders (that passed orders' WHERE):
+    look up rows in users where users.id = O.user_id
+    emit the combined row
+```
+
+Now stare at that inner lookup, because the entire performance of the join lives
+there. That `look up rows in users where users.id = O.user_id` runs **once for
+every driving row.** If `users.id` is indexed — and it's the primary key, so it is
+— each probe is a targeted B-tree seek, roughly O(log N), landing on the matching
+row almost instantly. That's an `eq_ref` or `ref` access in `EXPLAIN`.
+
+But if the inner join column were **not** indexed, each probe would have no choice
+but to scan the entire inner table looking for matches. One full scan. Per driving
+row. A join over 10,000 driving rows becomes 10,000 full scans of `users` — and
+now you understand the single most common cause of a slow join in the wild.
+
+<Callout type="insight" title="The join column that must be indexed is on the PROBED table">
+  People index the column they're filtering on and forget the join column. In a
+  nested loop, the index that matters most is on the **inner (probed)** table's
+  join column — the one being looked up once per driving row. Indexing the driving
+  table's join column does nothing for the loop; that table is being read
+  sequentially, not probed. Get this backwards and you index the wrong side.
+</Callout>
+
+## Which table drives, and why it matters so much
+
+The optimizer is **cost-based.** It doesn't join tables in the order you typed
+them — it estimates the work each ordering would take and picks the cheapest. The
+rule of thumb it's chasing: **drive from the table that produces the fewest rows
+after its own `WHERE` filter.**
+
+The reason falls straight out of the loop. The driving table's row count *is* the
+number of times the expensive inner probe runs. Drive from the table that filters
+down to 200 rows and you do 200 probes. Drive from the one that filters down to
+2 million rows and you do 2 million probes — same data, same result, 10,000× the
+work. So the optimizer works to put the most selective table on the outside, so the
+per-row cost is paid the fewest times.
+
+Two consequences worth internalising:
+
+- **The optimizer reorders joins freely.** How you *wrote* the join — which table
+  came first in the `FROM` clause — does not determine execution order. It reads
+  statistics and index availability and decides for itself.
+- **In `EXPLAIN`, the top table is the driving table.** The order rows appear in
+  the plan is the join order the optimizer chose. Reading that top-down tells you
+  which table drives and which get probed — see
+  [Part 4: reading EXPLAIN](/mysql-04-reading-explain/) for the full walk-through.
+
+## A worked example
+
+Here's the join, with a realistic filter on `orders`:
+
+```sql
+SELECT o.id, o.total_amount, u.email
+FROM orders o
+JOIN users u ON u.id = o.user_id
+WHERE o.status = 'paid'
+  AND o.created_at >= '2026-07-01';
+```
+
+Walk it the way the optimizer does. The `WHERE` clause filters `orders` hard — only
+paid orders since July. Say that's a few thousand rows out of millions. `users` has
+no filter at all, so driving from `users` would mean probing `orders` hundreds of
+thousands of times. Driving from `orders` means probing `users` a few thousand
+times. The optimizer picks `orders` as the driving table.
+
+Then, for each of those few thousand paid orders, it probes `users` on
+`u.id = o.user_id`. Because `users.id` is the primary key, that's an `eq_ref` seek
+— the fastest join access there is: at most one row, found via the clustered index
+(see [Part 3: how indexes work](/mysql-03-indexes-and-the-b-tree/)). A couple thousand log-N seeks
+into `users` is nothing. The join is fast because the selective table drives and the
+probed column is indexed. Both halves have to be true.
+
+Now break the second half. Suppose you joined on an **unindexed** column instead —
+say you matched orders to users by email text rather than by id:
+
+```sql
+SELECT o.id, o.total_amount, u.email
+FROM orders o
+JOIN users u ON u.email = o.contact_email   -- users.email NOT indexed
+WHERE o.status = 'paid'
+  AND o.created_at >= '2026-07-01';
+```
+
+Same driving table, same few thousand rows. But now each probe into `users` has no
+index to use, so — in the pure nested-loop world — it full-scans `users` every
+time. Thousands of full scans of a hundreds-of-thousands-row table. This is the
+query that "was fine in staging" and falls over in production, because the cost is
+invisible until the driving row count grows.
+
+<Callout type="gotcha" title="An FK index is not the same as a join-column index">
+  InnoDB requires an index on the child's referencing column to *create* a foreign
+  key, and auto-creates one if you don't. That protects your `user_id` join. But a
+  plain join column with **no** FK constraint gets no automatic index — MySQL will
+  happily let you join on it and full-scan the inner table forever. Don't assume
+  "it's a join column" means "it's indexed." Check.
+</Callout>
+
+## Hash join: the 8.x fallback
+
+MySQL 8.x has a second algorithm for exactly the unindexed case above. Since 8.0.18
+(and the default for equi-joins lacking a usable index since 8.0.20), the optimizer
+can run a **hash join** instead of a full-scan-per-row nested loop.
+
+The mechanics are different in a way that changes the whole cost profile. Instead of
+looping, MySQL takes the smaller of the two inputs — the **build** input — and reads
+it once into an in-memory hash table keyed on the join column. Then it scans the
+larger **probe** input once, and for each row does an O(1) hash lookup into that
+table. Two scans total, not a loop of scans. The cost is **O(N + M)** instead of the
+nested loop's O(N × scan-of-M).
+
+You spot it in `EXPLAIN` by its signature in the `Extra` column:
+
+```
+-> Inner hash join (users.email = orders.contact_email)
+   Using join buffer (hash join)
+```
+
+That phrase — **"Using join buffer (hash join)"** — is MySQL telling you: *there was
+no usable index on the join column, so I built a hash table instead.* It's a
+diagnostic, not necessarily an alarm. A few caveats come with it: hash join only
+works for **equi-joins** (`a.x = b.y`, not `a.x > b.y`); it needs memory, governed by
+`join_buffer_size`, and spills to disk if the build input doesn't fit; and it can't
+exploit an index's sort order the way a loop can.
+
+## The nuance that trips people up: is a hash join a bug?
+
+Here's where the intuition usually goes wrong. You see "Using join buffer (hash
+join)" in a plan, remember that indexes make things fast, and rush to add an index
+on the join column to "fix" it. Sometimes that's right. Often it isn't.
+
+A hash join means only one thing: **there's no usable index on the join column.**
+Whether that's a problem depends entirely on **selectivity**, not on table size.
+
+- **Selective join (OLTP):** few driving rows, each wanting one specific matching
+  row — like our few-thousand paid orders each looking up one user. Here a targeted
+  index probe is ideal, and an index on the join column genuinely fixes a slow plan.
+  This is when you add the index.
+- **Large / analytical join:** the query needs most of both tables anyway — a report
+  aggregating every order against every user, say. If you're going to read nearly all
+  of both tables regardless, an O(N + M) hash join is often **optimal.** An index
+  probe wouldn't help; it might even be *slower*, because you'd pay a random B-tree
+  seek for millions of rows instead of two clean sequential scans.
+
+<Callout type="note" title="The deciding property is selectivity, not size">
+  Don't add an index because a table is "big" or delete a hash join because it
+  "looks like a scan." Ask: *how many driving rows survive the filter, and does each
+  want one targeted row or a big slice?* Few rows wanting targeted lookups → index
+  the join column. Most of the table needed anyway → let the hash join do its job.
+  The size of the table is a distraction; selectivity is the signal.
+</Callout>
+
+## The misconception to bury: "LEFT JOIN is slower than INNER JOIN"
+
+This one is everywhere, so let's kill it precisely. `INNER`, `LEFT`, and `RIGHT` are
+**semantics** — they decide *which rows are kept.* An `INNER JOIN` drops rows with no
+match on either side; a `LEFT JOIN` keeps every driving-side row and fills the other
+side with `NULL` when there's no match. That's a statement about the result set, not
+about how it's computed.
+
+The **algorithm** (nested loop vs. hash) and the **driving table** are chosen by the
+cost optimizer from your indexes and statistics — the same machinery regardless of
+which join keyword you wrote. Swapping `INNER` for `LEFT` does not switch you from a
+fast plan to a slow one.
+
+There *is* one true footnote: a `LEFT JOIN` constrains join order somewhat, because
+the optimizer must preserve which side is the "kept" side, so it has slightly less
+freedom to reorder. But that's a mild constraint on ordering, not a performance tax
+on the keyword. If a `LEFT JOIN` is slow, it's slow for the same reason any join is
+slow — an unindexed probe column or the wrong driving table — not because it's a
+`LEFT JOIN`. Fix the index, not the keyword.
+
+## Where this goes next
+
+Every slow join you'll ever debug reduces to three questions, and you now have all
+three. *Which table drives?* (Read the top of `EXPLAIN`.) *Is the probed join column
+indexed?* (Look for `eq_ref`/`ref`, not a full scan.) *And if it's a hash join, is
+that actually wrong?* (Only if the join is selective.) Answer those and the plan
+stops being a black box.
+
+Next we leave query shape behind and turn to correctness under concurrency:
+transactions, isolation levels, and what "the database saw a consistent snapshot"
+actually means.
+
+> If you can look at a join plan and say which table drives, why the probed column
+> is or isn't indexed, and whether a hash join is the right call or a missing index
+> — you can debug joins better than most people who write them every day.

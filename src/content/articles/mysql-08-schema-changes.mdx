@@ -1,0 +1,255 @@
+---
+title: "Schema changes without downtime"
+subtitle: "Modern InnoDB adds columns instantly and indexes online — the risks left are the ones you don't pin down."
+description: "Evolving a live MySQL schema safely: foreign-key actions, online DDL (INSTANT / INPLACE / COPY), the metadata-lock trap, and staged column-add + batched backfill on a large table."
+level: "Operations"
+accent: "#00758f"
+readingTime: "10 min read"
+updated: 2026-08-18
+order: 26
+series: "MySQL"
+part: 8
+---
+
+import Callout from '../../components/Callout.astro';
+
+*MySQL deep-dive · Part 8 of 9. Next: [MySQL from application code](/mysql-09-application-code/).*
+
+There's a piece of folklore that follows every backend engineer around: "adding a
+column or an index to a big table locks it, so schedule a maintenance window."
+That advice was correct — in 2012. It has been wrong for over a decade, and
+believing it either costs you needless 2 a.m. deploys or, worse, lulls you into
+thinking a `ALTER TABLE` you *do* run at noon is automatically safe. Neither is
+true. Modern InnoDB can add a column in milliseconds regardless of table size and
+build a secondary index while reads and writes keep flowing. The real risks
+today are subtler and entirely avoidable once you can name them.
+
+We'll hang everything on one concrete task: **adding an indexed `discount_code`
+column to a 50-million-row `orders` table on a live system**, and doing it without
+a single blocked query. But first, two things that shape every schema decision —
+what the database can enforce for you, and what foreign keys do when you're not
+looking.
+
+## Let the database enforce your invariants
+
+Before you change a schema, decide what the schema itself should guarantee. MySQL
+enforces five kinds of constraint for you, and each one is a rule your application
+code can then stop re-checking on every path:
+
+- **`NOT NULL`** — the column must have a value.
+- **`UNIQUE`** — no two rows share the value (backed by an index).
+- **`DEFAULT`** — a value to use when none is supplied.
+- **`CHECK`** — an arbitrary boolean condition, *actually enforced* since 8.0.16
+  (before that it was parsed and ignored — a classic source of "but we have a
+  CHECK constraint" surprises).
+- **Foreign keys** — a child row must reference an existing parent row.
+
+The habit worth building: prefer a DB-enforced invariant over trusting that every
+code path — including the migration script, the admin console, and the one-off
+`UPDATE` someone runs by hand — remembers the rule. Code paths multiply; the
+constraint sits in one place and can't be forgotten.
+
+## Foreign keys: the actions matter more than the keys
+
+A foreign key isn't just "this column points at that table." The interesting part
+is what happens to the *child* rows when a *parent* row is deleted or updated.
+That behaviour is the referential action, and choosing it is a real decision:
+
+| Action | On parent DELETE / UPDATE | Notes |
+| --- | --- | --- |
+| `RESTRICT` | Reject if any child rows exist | The **default**, and the safe one |
+| `NO ACTION` | Same as `RESTRICT` in InnoDB | No practical difference |
+| `CASCADE` | Propagate the delete/update to all children | Powerful and dangerous |
+| `SET NULL` | Set the child's FK column to `NULL` | Column must be nullable |
+
+InnoDB also *requires* an index on the child's referencing column and will
+auto-create one if you didn't — the same join-column indexing we covered in
+[Part 5](/mysql-05-joins-and-the-optimizer/), just enforced for you here.
+
+<Callout type="gotcha" title="ON DELETE CASCADE at scale is a landmine">
+  `CASCADE` reads like a convenience: delete a customer, their orders vanish too.
+  But InnoDB does that cascade **in one transaction**. Delete a parent with two
+  million children and you get a single statement that locks two million rows,
+  runs for minutes, bloats the undo log, and floods replication — the exact
+  long-transaction pathology from [Part 7](/mysql-07-locking-and-deadlocks/). Many teams
+  deliberately keep `RESTRICT` on large relationships and do the child deletion
+  themselves, in application code, **batched** — the same medicine we'll apply to
+  the backfill below.
+</Callout>
+
+## Online DDL: three algorithms, and why you must pin one
+
+When you run an `ALTER TABLE`, InnoDB picks one of three strategies. Knowing them
+by name is the whole game, because the difference between them is the difference
+between a millisecond and a table that can't take writes for an hour.
+
+- **`ALGORITHM=INSTANT`** — a metadata-only change. **No table rebuild, no data
+  copy.** It edits the table definition and returns in milliseconds *regardless of
+  how many rows the table has*. Since 8.0.29 it covers adding a column anywhere in
+  the row (not just at the end), dropping a column, and renaming a column.
+- **`ALGORITHM=INPLACE`** — the change is made inside the storage engine without a
+  server-layer copy. It usually permits concurrent **reads and writes** with
+  `LOCK=NONE`. This is how you add a secondary index to a live table.
+- **`ALGORITHM=COPY`** — InnoDB builds an entire new copy of the table and swaps it
+  in. It **blocks writes (DML)** for the whole duration. On a 50M-row table that's
+  the hour-long, table-locking migration everyone's afraid of. It's the fallback
+  you want to *avoid*, not reach for.
+
+The single most important operational habit in this whole article: **always state
+`ALGORITHM=` explicitly.** Not because it changes what MySQL does when the fast
+path is available — it doesn't — but because it makes MySQL *fail loud*.
+
+<Callout type="insight" title="Pinning ALGORITHM is a guarantee, not a mode switch">
+  Omitting `ALGORITHM` does **not** mean MySQL defaults to `COPY`. Left to itself,
+  it auto-picks the least-locking algorithm available — `ADD INDEX`, for instance,
+  defaults to `INPLACE, LOCK=NONE` on its own. The danger is different: for an
+  operation that *can't* be done online, MySQL **silently falls back to `COPY`**
+  with no warning. You think you ran a quick online change; you actually locked
+  the table for an hour. Writing `ALGORITHM=INPLACE, LOCK=NONE` doesn't switch on
+  a faster mode — it asks MySQL to *guarantee* that mode and **error out** if it
+  can't deliver it. Fail-loud beats fail-slow every time.
+</Callout>
+
+## The limitations that bite in production
+
+Online DDL is genuinely powerful, but it has sharp edges the manual is explicit
+about. These are the ones that turn "should be instant" into an incident:
+
+- **The INSTANT row-version ceiling.** Every `INSTANT` add/drop column bumps a
+  hidden row-version counter on the table. The max is **64** (raised to 255 in
+  9.1.0). Hit the ceiling and further `INSTANT` add/drop is **rejected** — you
+  then have to rebuild the table (a `COPY`/`INPLACE` `ALTER`, or `OPTIMIZE
+  TABLE`), which resets the counter. A schema that churns columns frequently can
+  quietly march toward this limit.
+- **INSTANT is `LOCK=DEFAULT` only.** You cannot combine `ALGORITHM=INSTANT` with
+  `LOCK=NONE`. It doesn't need to — it's already a metadata-only flick — but if
+  your migration template blindly appends `LOCK=NONE`, an `INSTANT` operation will
+  error.
+- **`LOCK=NONE` is forbidden with cascading FKs.** If the table has an `ON ...
+  CASCADE` or `ON ... SET NULL` foreign-key constraint, `LOCK=NONE` is **not
+  permitted**. Another reason the `RESTRICT`-plus-batching pattern keeps your life
+  simple.
+- **The metadata lock at the edges.** Even a fully online `ALTER` needs a brief
+  **exclusive metadata lock (MDL)** at the very start and again in the final phase
+  to swap in the new table definition. It's momentary — *unless* something is
+  holding an MDL on that table already.
+
+<Callout type="gotcha" title="A long transaction will freeze your instant ALTER">
+  This is the failure that surprises people most. Your `ALTER` is genuinely cheap
+  — `INSTANT`, milliseconds — but it hangs anyway, and every query behind it
+  hangs too. The cause is almost always a **long-running transaction holding a
+  metadata lock** on the target table: an idle-in-transaction session, a forgotten
+  `BEGIN` in a console, a slow batch job. The `ALTER` can't grab its exclusive MDL
+  to finish, so it queues — and because MDL requests are FIFO, *every* subsequent
+  query on that table queues behind the `ALTER`. Before any DDL on a hot table,
+  check `performance_schema` / `SHOW PROCESSLIST` for old transactions and kill or
+  wait them out. See [Part 7](/mysql-07-locking-and-deadlocks/) on why long transactions are the
+  root of so much grief.
+</Callout>
+
+## The worked example: an indexed column on 50M rows
+
+Here's the task again: add `discount_code VARCHAR(20)` to `orders` (50M rows),
+backfill it from an existing `promotions` join, and index it for lookups. Let's
+do it the tempting way first, then the safe way.
+
+### The wrong way: one ALTER to rule them all
+
+```sql
+-- DON'T: adds a column AND an index in a single statement
+ALTER TABLE orders
+  ADD COLUMN discount_code VARCHAR(20),
+  ADD INDEX idx_orders_discount (discount_code);
+```
+
+This reads clean, and on a small table it's fine. On 50M rows it's a trap, for
+two reasons. First, combining the operations can force InnoDB into a **table
+rebuild** rather than the instant path — you've thrown away the free
+metadata-only add. Second, you never pinned `ALGORITHM`, so if this can't be done
+online you get a **silent `COPY`**: a new 50M-row table built on disk while
+writes are blocked. What looked like one tidy migration becomes an hour-long
+outage.
+
+### The safe way: three separate, deliberate steps
+
+**Step 1 — add the column, instantly.** Split the column and the index apart.
+Adding the column alone is a metadata change:
+
+```sql
+ALTER TABLE orders
+  ADD COLUMN discount_code VARCHAR(20) NULL,
+  ALGORITHM=INSTANT;
+```
+
+Milliseconds, on all 50M rows, because nothing is rewritten. Note it's nullable —
+the rows exist without the value yet; we'll fill it next. (Don't append
+`LOCK=NONE` here; `INSTANT` won't accept it.)
+
+**Step 2 — backfill in batches, not in one shot.** The naïve backfill is its own
+disaster:
+
+```sql
+-- DON'T: one giant UPDATE locks millions of rows in one transaction
+UPDATE orders o
+  JOIN promotions p ON p.order_id = o.id
+  SET o.discount_code = p.code;
+```
+
+Even though the *DDL* was cheap, this single `UPDATE` locks millions of rows in
+one long transaction — the same replication-lag, undo-bloat, lock-footprint
+problem as `CASCADE`. Batch it by primary-key range, one small transaction at a
+time:
+
+```sql
+-- Repeat, advancing the range, until you run off the end of the table
+UPDATE orders o
+  JOIN promotions p ON p.order_id = o.id
+  SET o.discount_code = p.code
+  WHERE o.id BETWEEN ? AND ?      -- e.g. 10,000-row windows
+    AND o.discount_code IS NULL;  -- idempotent: safe to re-run a window
+```
+
+Drive `?` forward in windows of a few thousand rows from your application or a
+script, with a brief pause between batches to let replicas catch up. Each batch is
+a short transaction holding few locks; the server stays responsive throughout.
+
+**Step 3 — add the index, online.** Now build the secondary index on its own,
+with the algorithm pinned so MySQL guarantees the online path or refuses:
+
+```sql
+ALTER TABLE orders
+  ADD INDEX idx_orders_discount (discount_code),
+  ALGORITHM=INPLACE, LOCK=NONE;
+```
+
+`INPLACE` builds the index inside InnoDB while reads and writes continue;
+`LOCK=NONE` is your fail-loud guarantee. If MySQL can't honour it, you get an
+error *before* anything happens — not a silent hour-long copy.
+
+<Callout type="note" title="For the hottest tables: shadow-copy tools">
+  On extremely write-heavy tables, even the brief final MDL of a native online
+  `ALTER` can be hard to grab. That's where **`pt-online-schema-change`** (Percona
+  Toolkit) and **`gh-ost`** (GitHub) come in. They sidestep the problem entirely:
+  build a shadow copy of the table, copy rows in the background, keep it in sync
+  (via triggers or by tailing the binlog), then swap it in with one atomic rename.
+  They're the answer when native online DDL's momentary locks are still too much —
+  not a replacement for understanding the native path, but the next tool up.
+</Callout>
+
+## The mental model to carry forward
+
+Three steps, three deliberate choices — and not one maintenance window. The old
+"schema changes need downtime" rule has been replaced by a shorter, sharper set
+of things to actually watch:
+
+- A **long transaction holding an MDL** will freeze even an instant `ALTER` and
+  queue everything behind it. Check for old transactions before any DDL.
+- A **silent `COPY` fallback** happens when you don't pin `ALGORITHM`. Always
+  state it, so MySQL fails loud instead of quietly locking the table.
+- An **unbatched backfill `UPDATE`** locks millions of rows even when the DDL
+  itself was free. Batch by key range, small transactions, let replicas breathe.
+
+> If you can explain why a single `ALTER` on 50M rows can be either instant or an
+> hour-long outage — and split it into an INSTANT add, a batched backfill, and an
+> INPLACE index so it's always the former — you've retired the maintenance window
+> for good.

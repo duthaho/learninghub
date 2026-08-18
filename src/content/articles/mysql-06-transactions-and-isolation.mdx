@@ -1,0 +1,297 @@
+---
+title: "Transactions and isolation levels"
+subtitle: "Isolation is a dial, not a guarantee — and MySQL's default is not the one most other databases use."
+description: "ACID and MySQL isolation levels: REPEATABLE READ vs READ COMMITTED, MVCC snapshots, the three read anomalies, and why REPEATABLE READ alone doesn't make read-then-write safe."
+level: "Concurrency"
+accent: "#00758f"
+readingTime: "11 min read"
+updated: 2026-08-18
+order: 24
+series: "MySQL"
+part: 6
+---
+
+import Callout from '../../components/Callout.astro';
+
+*MySQL deep-dive · Part 6 of 9. Next: [Locking and deadlocks](/mysql-07-locking-and-deadlocks/).*
+
+Most people think of a transaction as "a bunch of statements that succeed or fail
+together." That's the **A** in ACID, and it's the easy part. The hard part — the
+part that quietly corrupts money in production — is the **I**: *isolation*. When
+two transactions touch the same data at the same time, what does each one see?
+
+The uncomfortable answer is: **it depends on a dial.** Isolation isn't one
+guarantee; it's a setting with four positions, each trading correctness for
+concurrency. And MySQL's default position is not the one Postgres, Oracle, or SQL
+Server ship with — so code that behaves one way on your laptop can behave
+differently on someone else's stack. This article is about reading that dial
+correctly.
+
+We'll hang everything on a table you already have in your head: an `accounts`
+table (a `balance` per user) and an `invoices` table (a `total` per invoice).
+
+## ACID in one breath, then the part that matters
+
+A transaction is a unit of work that either **fully happens or fully doesn't.**
+The four letters:
+
+- **Atomicity** — all statements commit, or none do. A crash mid-transaction
+  rolls back cleanly.
+- **Consistency** — the database moves from one valid state to another; your
+  constraints hold at commit.
+- **Isolation** — concurrent transactions don't step on each other's toes. *How
+  much* they don't is the dial.
+- **Durability** — once committed, it survives a crash (that's the redo log, a
+  different chapter).
+
+Atomicity and durability are mostly binary: you either have them or you have a
+bug. Isolation is the one that's a **spectrum**, and the spectrum is defined by
+which *anomalies* it lets through.
+
+## The three anomalies, named precisely
+
+An anomaly is a specific way concurrent transactions can surprise you. There are
+three classic ones, and getting their names exactly right is half the battle —
+because two of them sound like the isolation levels meant to fix them.
+
+- **Dirty read** — you read another transaction's **uncommitted** change. It
+  might get rolled back, and now you've acted on data that never officially
+  existed.
+- **Non-repeatable read** — you read the **same row twice** in one transaction
+  and get a **different committed value** the second time, because another
+  transaction committed an `UPDATE` in between.
+- **Phantom read** — you re-run the **same range query** and the second run
+  returns **new rows**, because another transaction committed an `INSERT` that
+  matches your `WHERE`.
+
+Note the difference between the last two: a non-repeatable read is about an
+**existing row's value changing**; a phantom is about the **set of rows changing**.
+
+<Callout type="gotcha" title="'Non-repeatable read' is the problem; 'REPEATABLE READ' is the fix">
+  These two phrases are near-opposites that sound almost identical. A
+  **non-repeatable read** is an *anomaly* — the bad thing where a row's value
+  changes under you. **REPEATABLE READ** is an *isolation level* — the setting
+  that *prevents* that anomaly by making your reads repeatable. When someone says
+  "repeatable read," listen for whether they mean the problem or the cure; the
+  whole sentence flips depending on which.
+</Callout>
+
+## The four levels × the three anomalies
+
+Each isolation level is defined by which anomalies it still permits. From loosest
+to strictest:
+
+| Isolation level      | Dirty read | Non-repeatable read | Phantom read |
+| -------------------- | ---------- | ------------------- | ------------ |
+| READ UNCOMMITTED     | possible   | possible            | possible     |
+| READ COMMITTED       | prevented  | possible            | possible     |
+| REPEATABLE READ      | prevented  | prevented           | prevented\*  |
+| SERIALIZABLE         | prevented  | prevented           | prevented    |
+
+Read the table as a **dial**: each step down the rows buys you fewer surprises at
+the cost of more coordination between transactions. `SERIALIZABLE` makes
+concurrent transactions behave as if they ran one after another — perfectly safe,
+and the slowest.
+
+The asterisk on `REPEATABLE READ` matters, and it's a MySQL-specific gift.
+
+<Callout type="note" title="The phantom footnote">
+  By the SQL standard, `REPEATABLE READ` is allowed to let phantoms through.
+  InnoDB goes further: it **prevents phantoms too**. Plain consistent reads never
+  see them because they read a frozen snapshot; locking reads are protected by
+  **next-key (gap) locks** that lock the gaps between rows so no matching `INSERT`
+  can sneak in. That gap-locking machinery is the subject of
+  [Part 7](/mysql-07-locking-and-deadlocks/); for now, just know MySQL's default
+  is stronger than the standard requires.
+</Callout>
+
+## MySQL's default is REPEATABLE READ — and that's unusual
+
+Here's the fact that trips up people who move between databases: **MySQL (InnoDB)
+defaults to `REPEATABLE READ`.** Postgres, Oracle, and SQL Server all default to
+`READ COMMITTED`. Same SQL, same anomaly table — different starting position on
+the dial.
+
+So the identical read-modify-write logic can see a stable snapshot on MySQL and a
+shifting one on Postgres, and you'll swear one of them has a bug. Neither does;
+they just ship with the dial in different spots. Always know which level you're
+actually running:
+
+```sql
+SELECT @@transaction_isolation;   -- e.g. REPEATABLE-READ
+```
+
+## How MySQL delivers this: MVCC
+
+InnoDB doesn't achieve isolation by making readers wait for writers. It uses
+**MVCC — Multi-Version Concurrency Control.** Every row carries hidden version
+metadata, and when a row is updated, InnoDB keeps the **old versions in the undo
+log**. A plain, non-locking `SELECT` — what InnoDB calls a *consistent read* —
+doesn't read "the current row." It reads the version of the row **as of a
+snapshot** taken at a specific point in time, reconstructing older versions from
+the undo log if needed, and simply ignores anything committed after that point.
+
+The payoff is the headline property of MVCC: **readers don't block writers, and
+writers don't block readers.** A long report can scan a table for minutes while
+other transactions update it, and neither side waits on the other. The reader
+sees a consistent point-in-time picture; the writer proceeds unbothered.
+
+The only real difference between the two common levels is **when the snapshot is
+taken**:
+
+- **REPEATABLE READ** takes the snapshot at your **first consistent read** and
+  **reuses it for the entire transaction.** Every plain `SELECT` after that sees
+  the same frozen world.
+- **READ COMMITTED** takes a **fresh snapshot for every statement.** Each plain
+  `SELECT` sees whatever was committed as of the moment it ran.
+
+That single timing choice is what makes non-repeatable reads possible under
+`READ COMMITTED` and impossible under `REPEATABLE READ`.
+
+### Worked example: the same query, two levels
+
+Transaction **A** reads an invoice total, does some work, then reads it again.
+Transaction **B** updates that invoice and commits in between. Watch what A sees.
+
+Under **REPEATABLE READ** (MySQL's default):
+
+```sql
+-- Transaction A                          -- Transaction B
+BEGIN;
+SELECT total FROM invoices WHERE id = 5;
+-- A sees: 200   (snapshot frozen here)
+                                          BEGIN;
+                                          UPDATE invoices SET total = 350
+                                            WHERE id = 5;
+                                          COMMIT;   -- 350 is now committed
+SELECT total FROM invoices WHERE id = 5;
+-- A STILL sees: 200   (reusing its frozen snapshot)
+COMMIT;
+```
+
+A reads `200` both times. B's committed `350` is invisible to A until A finishes
+its transaction. A's reads are **repeatable** — that's the level doing its job.
+
+Now the exact same interleaving under **READ COMMITTED**:
+
+```sql
+-- Transaction A                          -- Transaction B
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+BEGIN;
+SELECT total FROM invoices WHERE id = 5;
+-- A sees: 200   (fresh snapshot for this statement)
+                                          BEGIN;
+                                          UPDATE invoices SET total = 350
+                                            WHERE id = 5;
+                                          COMMIT;
+SELECT total FROM invoices WHERE id = 5;
+-- A now sees: 350   (fresh snapshot, sees B's commit)
+COMMIT;
+```
+
+Same two statements in A, same value on disk — but A now reads `200` then `350`
+inside one transaction. **That is a non-repeatable read**: the anomaly that
+`READ COMMITTED` permits and `REPEATABLE READ` forbids. Neither answer is "wrong";
+they're two valid points on the dial. You just have to know which one you're on.
+
+## The dangerous misconception: "REPEATABLE READ makes read-then-write safe"
+
+Here's where a lot of correct-looking code loses money. The reasoning goes:
+*"Under REPEATABLE READ the data can't change under me, so if I read a balance and
+then update based on it, I'm safe."*
+
+It is not safe. `REPEATABLE READ` freezes what your **plain `SELECT`s see** — it
+does **not lock the row.** Another transaction can update and commit that row
+while your snapshot happily keeps showing the old value. If you then write based
+on what you read, you can clobber their change. This is the **lost update**, and
+it's the classic account-balance bug:
+
+```sql
+-- Transaction A (RR)                     -- Transaction B (RR)
+BEGIN;                                    BEGIN;
+SELECT balance FROM accounts             SELECT balance FROM accounts
+  WHERE id = 7;   -- reads 100             WHERE id = 7;   -- reads 100
+-- both decide: 100 - 100 = 0, OK
+UPDATE accounts SET balance = 0          UPDATE accounts SET balance = 0
+  WHERE id = 7;                            WHERE id = 7;
+COMMIT;                                   COMMIT;
+-- two $100 withdrawals; balance = 0, not -100. One withdrawal vanished.
+```
+
+Both transactions read `100` from their snapshots, both compute `0`, both write
+`0`. Two withdrawals happened; the account only lost one of them. `REPEATABLE
+READ` did exactly what it promises — kept each transaction's *reads* stable — and
+that's precisely why it didn't save you. Stable reads are not locked reads.
+
+<Callout type="insight" title="A consistent read and a locking read can disagree in the same transaction">
+  Under `REPEATABLE READ`, a **plain** `SELECT` reads your frozen snapshot, but a
+  **locking** read — `SELECT ... FOR UPDATE`, or the read inside an `UPDATE` /
+  `DELETE` — reads the **latest committed version**, not your snapshot. So the
+  same `WHERE` clause can return one number as a plain `SELECT` and a *different*
+  number as `SELECT ... FOR UPDATE`, in a single transaction. Locking reads
+  always see current reality, because their whole job is to act on it safely.
+</Callout>
+
+## Three ways to actually make read-then-write safe
+
+The fix is never "trust the isolation level." It's to make the write acknowledge
+concurrency explicitly. Three standard tools:
+
+**1. Lock the row you're about to change** with a locking read. `FOR UPDATE`
+reads the *latest committed* value and holds a lock so no one else can touch that
+row until you commit:
+
+```sql
+BEGIN;
+SELECT balance FROM accounts WHERE id = 7 FOR UPDATE;  -- latest value, locked
+-- B now blocks here if it tries the same row
+UPDATE accounts SET balance = balance - 100 WHERE id = 7;
+COMMIT;
+```
+
+The mechanics of that lock — what it blocks, and how two of them deadlock — are
+[Part 7](/mysql-07-locking-and-deadlocks/).
+
+**2. Make the check and the write one atomic statement.** Don't read-then-decide
+in the app; let the database do the arithmetic and the guard in a single
+`UPDATE`, then check how many rows it changed:
+
+```sql
+UPDATE accounts
+  SET balance = balance - 100
+  WHERE id = 7 AND balance >= 100;
+-- 0 rows affected → insufficient funds; 1 row → it worked
+```
+
+A single `UPDATE` reads the current row and locks it as part of executing, so no
+snapshot staleness applies and no other transaction can slip between the check and
+the write. This is the cleanest fix when the logic fits in one statement.
+
+**3. Optimistic locking with a version column.** When you must read in the app,
+compute, and write back later, add a `version` column and make the write assert
+that nothing changed underneath you:
+
+```sql
+SELECT balance, version FROM accounts WHERE id = 7;   -- balance 100, version 12
+-- ... app-side logic ...
+UPDATE accounts
+  SET balance = 0, version = 13
+  WHERE id = 7 AND version = 12;
+-- 0 rows affected → someone else wrote first; re-read and retry
+```
+
+If another transaction bumped `version` to 13 first, your `WHERE version = 12`
+matches nothing, you get 0 rows, and you retry instead of silently overwriting.
+No held locks — you find out at write time.
+
+## Where this goes next
+
+Isolation levels answer *what a transaction sees*. They deliberately don't answer
+*what a transaction can grab and hold* — and that second question is where the
+`FOR UPDATE` lock, gap locks, blocking, and deadlocks live. That's the next
+chapter: [Locking and deadlocks](/mysql-07-locking-and-deadlocks/), the
+follow-through on making read-then-write safe under real contention.
+
+> If you can explain why A still reads `200` under REPEATABLE READ but `350` under
+> READ COMMITTED — and why REPEATABLE READ still lets two withdrawals lose one —
+> you understand isolation better than most people who ship transactions daily.

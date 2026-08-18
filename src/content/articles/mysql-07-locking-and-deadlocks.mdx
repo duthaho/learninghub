@@ -1,0 +1,307 @@
+---
+title: "Locking and deadlocks"
+subtitle: "Locks attach to index records, deadlocks are normal, and the only real cure is consistent order plus retry."
+description: "InnoDB locking explained: shared vs exclusive, record/gap/next-key locks, why an unindexed WHERE locks everything, how deadlocks form, and the lock-ordering + retry patterns that prevent them."
+level: "Concurrency"
+accent: "#00758f"
+readingTime: "11 min read"
+updated: 2026-08-18
+order: 25
+series: "MySQL"
+part: 7
+---
+
+import Callout from '../../components/Callout.astro';
+
+*MySQL deep-dive · Part 7 of 9. Next: [Schema changes without downtime](/mysql-08-schema-changes/).*
+
+In [Part 6](/mysql-06-transactions-and-isolation/) you saw that isolation is
+half illusion: plain `SELECT`s read from an **MVCC snapshot**, a consistent
+point-in-time view that never blocks and is never blocked. That covers reads.
+But the moment a transaction intends to *change* a row — or even declares that
+it's about to — MVCC snapshots aren't enough, and InnoDB reaches for the other
+half of the machinery: **locks**. This chapter is about that half, and about
+the failure mode it produces under load — deadlocks — which are not a bug to be
+eliminated but a condition to be handled.
+
+Hold onto one sentence for the whole article: **InnoDB locks index records, not
+rows, and not tables.** Almost every surprising thing about MySQL locking falls
+out of that.
+
+## Shared and exclusive locks
+
+There are two kinds of row-level lock, and they differ only in how they
+tolerate company.
+
+A **shared (S) lock** says "I'm reading this row and I don't want it to change
+under me." Many transactions can hold an S lock on the same row at once —
+they're all just reading. You take one explicitly with `SELECT ... FOR SHARE`.
+
+An **exclusive (X) lock** says "this row is mine to modify." Only one
+transaction can hold it, and while it does, no one else can take an S *or* an X
+lock on that row — they wait. Every `UPDATE` and `DELETE` takes an X lock on the
+rows it touches, and you can request one explicitly with `SELECT ... FOR
+UPDATE`.
+
+The compatibility rule is the whole story: S is compatible with S; X is
+compatible with nothing.
+
+<Callout type="insight" title="Plain SELECT takes no locks at all">
+  A bare `SELECT * FROM accounts WHERE id = 1` acquires **zero** row locks. It
+  reads from the MVCC snapshot ([Part 6](/mysql-06-transactions-and-isolation/))
+  and neither blocks writers nor is blocked by them. Locking only enters the
+  picture when you write, or when you *tell* InnoDB you're about to write with
+  `FOR UPDATE` / `FOR SHARE`. If you find yourself wondering "why is this
+  read blocking?" — check whether it's really a plain read, or a locking read in
+  disguise.
+</Callout>
+
+## Three granularities: record, gap, and next-key
+
+"Row-level lock" is a convenient lie. InnoDB actually has three flavours of
+lock, and understanding the difference is what separates people who can debug a
+deadlock from people who guess.
+
+A **record lock** locks a single index record — one existing row, found through
+an index. This is what you picture when you think "lock the row."
+
+A **gap lock** locks the *open interval between* two index records. It locks
+nothing that exists — there's no row there — it locks the *possibility* of a
+row. Its only job is to stop another transaction from `INSERT`ing a value into
+that range. If ids 10 and 20 exist and you gap-lock between them, nobody can
+insert id 15 until you're done.
+
+A **next-key lock** is the combination: a record lock on a row *plus* the gap
+immediately before it. This is InnoDB's **default** behaviour for a locking read
+under `REPEATABLE READ`. When you run a ranged `SELECT ... FOR UPDATE`, InnoDB
+doesn't just lock the matching rows — it next-key-locks them, sealing the gaps
+around them too.
+
+### Why next-key locks are how RR prevents phantoms
+
+Recall from [Part 6](/mysql-06-transactions-and-isolation/) that `REPEATABLE
+READ` promises the same query returns the same rows twice within a transaction —
+no *phantoms*, no new rows appearing between reads. For plain snapshot reads,
+MVCC delivers that for free. But a *locking* read (`FOR UPDATE`) reads the
+latest committed data, not the snapshot — so MVCC can't help it. Something has
+to physically prevent a concurrent insert into the range you just read.
+
+That something is the gap lock. When transaction A runs:
+
+```sql
+SELECT * FROM accounts WHERE balance > 1000 FOR UPDATE;
+```
+
+InnoDB next-key-locks every matching record *and the gaps between them*. Now if
+transaction B tries `INSERT INTO accounts (balance) VALUES (5000)`, it lands in
+a locked gap and **waits**. A can re-run its query and get the identical set.
+The phantom is prevented not by magic in the snapshot, but by gap locks blocking
+the range from filling in.
+
+<Callout type="note" title="READ COMMITTED trades gap locks for concurrency">
+  Under `READ COMMITTED`, InnoDB largely **disables gap locks** and takes only
+  record locks on rows that actually match. Fewer locks means more concurrency
+  and fewer deadlocks — but the gaps are open again, so phantoms come back. This
+  is a real, deliberate tuning lever: high-contention write workloads sometimes
+  run RC precisely to shed gap-lock deadlocks, accepting weaker isolation in
+  exchange. Know which one you're on before you reason about a lock.
+</Callout>
+
+## The gotcha that eats concurrency: locks attach to index records
+
+Here is the sentence from the top, cashed out. Because locks attach to **index
+records**, InnoDB can only lock a row by *finding* it through an index. So the
+locking behaviour of a write depends entirely on how the query is executed —
+the same lesson about scans from [Part 4](/mysql-04-reading-explain/), now
+with teeth.
+
+Consider:
+
+```sql
+UPDATE accounts SET frozen = 1 WHERE owner_email = 'a@b.com';
+```
+
+If `owner_email` has an index, InnoDB seeks straight to the matching records and
+locks just those. If it does **not**, InnoDB must do a full scan — and it takes
+an X lock on **every index record it examines**, not just the ones that match
+the `WHERE` and get changed. To find your one row, it walks and locks the entire
+table's worth of records. For the duration of that transaction, essentially
+nobody else can write to `accounts`.
+
+<Callout type="gotcha" title="A missing index on a WHERE column can lock the whole table">
+  People index columns for read speed and stop there. But an unindexed `WHERE`
+  on an `UPDATE` or `DELETE` doesn't just run slowly — **it locks every row it
+  scans**, because InnoDB releases locks only on rows it can prove don't match
+  *after* locking them to look. One unindexed bulk `DELETE` can freeze writes
+  across a table and turn a healthy system into a pile of lock-wait timeouts and
+  deadlocks. Index the columns you filter on for **writes**, not just for reads.
+</Callout>
+
+## Deadlocks: a cycle, a detector, a victim
+
+A deadlock is not "the database got stuck." It's a precise structure: a **cycle
+of waits**.
+
+- Transaction A holds a lock on row 1 and wants row 2.
+- Transaction B holds a lock on row 2 and wants row 1.
+
+Neither can proceed, because each is waiting for a lock the other holds and will
+only release on commit. Left alone they'd wait forever. So InnoDB doesn't leave
+it alone: it runs a **deadlock detector** that watches the wait-for graph and,
+the instant a cycle forms, breaks it. It picks a **victim** — usually the
+transaction that has done the least work, because it's the cheapest to undo —
+rolls that transaction back entirely, and lets the other proceed. The victim's
+client gets:
+
+```
+ERROR 1213 (40001): Deadlock found when trying to restart transaction
+```
+
+That rollback is InnoDB **working correctly**. It detected an unresolvable
+situation and resolved it the only way possible: by sacrificing one party so the
+other can make progress.
+
+<Callout type="note" title="1213 is not 1205 — deadlock vs lock wait timeout">
+  Don't conflate the two errors. **1213** ("Deadlock found") means a genuine
+  *cycle* was detected and your transaction was chosen as the victim and rolled
+  back instantly. **1205** ("Lock wait timeout exceeded") means there was *no*
+  cycle — you were simply waiting on a lock someone else held for longer than
+  `innodb_lock_wait_timeout` (default 50s), and your single statement gave up.
+  1213 is a topology problem (fix the ordering); 1205 is a duration problem (a
+  transaction is holding locks too long — shorten it).
+</Callout>
+
+## Worked example: the classic transfer deadlock
+
+Money transfers are the textbook case because the business logic naturally locks
+two rows in an order that depends on the *direction* of the transfer.
+
+Transaction A transfers from account 1 to account 2. Transaction B transfers
+from account 2 to account 1. They run at the same time. Watch the interleaving:
+
+```sql
+-- Transaction A (transfer 1 -> 2)        -- Transaction B (transfer 2 -> 1)
+BEGIN;                                     BEGIN;
+
+UPDATE accounts SET balance = balance - 100
+  WHERE id = 1;   -- A holds X lock on id=1
+                                           UPDATE accounts SET balance = balance - 50
+                                             WHERE id = 2;   -- B holds X lock on id=2
+
+UPDATE accounts SET balance = balance + 100
+  WHERE id = 2;   -- A WAITS for id=2 (B has it)
+                                           UPDATE accounts SET balance = balance + 50
+                                             WHERE id = 1;   -- B WAITS for id=1 (A has it)
+-- cycle: A waits on B, B waits on A
+```
+
+Now A holds id=1 and needs id=2; B holds id=2 and needs id=1. That's the cycle.
+InnoDB's detector spots it immediately, picks a victim — say B — rolls B back,
+and returns 1213 to B's client. A commits fine. B's transfer simply didn't
+happen.
+
+Notice what caused it: the two transactions acquired their locks in **opposite
+orders**. A went 1→2, B went 2→1. That's the entire disease.
+
+### The fix: lock in a deterministic order
+
+The cure is to make every transaction acquire its locks in the *same* order,
+regardless of business direction. Sort by something stable — the primary key is
+perfect. Grab both rows up front, in ascending id order, with a single locking
+read:
+
+```sql
+BEGIN;
+-- Lock BOTH rows first, in a fixed order that never depends on direction:
+SELECT * FROM accounts WHERE id IN (1, 2) ORDER BY id FOR UPDATE;
+
+-- Now do the arithmetic; the locks are already held, in a consistent order.
+UPDATE accounts SET balance = balance - 100 WHERE id = 1;
+UPDATE accounts SET balance = balance + 100 WHERE id = 2;
+COMMIT;
+```
+
+Because *both* transactions now lock id=1 before id=2, one of them wins the race
+for id=1 and the other queues behind it — a plain wait, not a cycle. The loser
+blocks briefly, then proceeds once the winner commits. No cross-wait can form,
+so no deadlock. The `ORDER BY id` is the load-bearing part: it turns "lock in
+whatever order the transfer implies" into "always lock ascending."
+
+Consistent ordering is the single most effective structural defence. But it is
+not the *only* defence, and it is not a guarantee.
+
+## You cannot eliminate deadlocks — so retry
+
+The most expensive misconception in this whole area:
+
+> "A deadlock means my code is broken. If I get the locking right, I'll never
+> see one."
+
+No. Under real concurrency, deadlocks are **normal and expected**. Consistent
+lock ordering handles the two-row transfer case cleanly, but a system of any
+size has locking paths you didn't anticipate: a gap lock from one query
+colliding with an insert from another, two different code paths touching
+overlapping rows through different indexes, a background job crossing a user
+request. You can drive the *frequency* toward zero. You cannot prove it *is*
+zero. And InnoDB rolling back a victim is the system functioning, not failing.
+
+Which means there is exactly one mandatory countermeasure: **retry logic**. A
+1213 is not an exception to log and surface to the user — it's a signal to
+replay the transaction from the top. The victim was rolled back cleanly, leaving
+no partial state, so re-running it is safe.
+
+```python
+def transfer_with_retry(conn, from_id, to_id, amount, attempts=3):
+    for attempt in range(attempts):
+        try:
+            with conn.begin():                       # BEGIN ... COMMIT
+                lo, hi = sorted((from_id, to_id))    # consistent lock order
+                conn.execute(
+                    "SELECT * FROM accounts WHERE id IN (%s, %s) "
+                    "ORDER BY id FOR UPDATE", (lo, hi))
+                conn.execute("UPDATE accounts SET balance = balance - %s "
+                             "WHERE id = %s", (amount, from_id))
+                conn.execute("UPDATE accounts SET balance = balance + %s "
+                             "WHERE id = %s", (amount, to_id))
+            return                                    # committed; done
+        except DeadlockError:                         # MySQL error 1213
+            if attempt == attempts - 1:
+                raise                                 # give up after N tries
+            continue                                  # replay the whole txn
+```
+
+Two things make this correct. First, the **whole transaction** is inside the
+retry loop — you replay from `BEGIN`, not from the middle, because the rollback
+threw away everything. Second, it's bounded: a handful of attempts, ideally with
+a little backoff, so a persistent conflict fails loudly instead of spinning.
+
+<Callout type="gotcha" title="The real bug is assuming commit always succeeds">
+  Code that wraps writes in a transaction and treats `COMMIT` as infallible is
+  the actual defect — it will silently drop transfers the day traffic spikes.
+  The deadlock isn't the bug; the *missing retry* is. Combine both layers:
+  consistent lock ordering to make deadlocks **rare**, and retry logic to make
+  them **harmless** when they happen anyway.
+</Callout>
+
+## The defences, stacked
+
+There's no single knob. You layer cheap structural habits and keep the one
+non-negotiable at the bottom:
+
+- **Consistent lock ordering.** Always acquire locks in a deterministic order
+  (ascending primary key), independent of business direction. Kills the classic
+  cross-wait cycle.
+- **Keep transactions short.** Locks are held until commit. A transaction that
+  does network I/O or user think-time while holding X locks is a deadlock and
+  1205 factory. Acquire late, commit fast.
+- **Index your `WHERE` columns for writes.** Lock the rows you mean, not every
+  row you scan. This alone removes a huge class of accidental wide locks.
+- **Consider `READ COMMITTED`** for high-contention write paths to shed gap
+  locks — at the cost of phantoms.
+- **Always retry on 1213.** Non-negotiable. Everything above reduces frequency;
+  only retry makes the residual deadlocks a non-event.
+
+> If you can explain why an unindexed `UPDATE` locks the whole table, and why
+> the transfer deadlock disappears the moment both transactions lock `id`
+> ascending — but retry logic is still mandatory anyway — you understand InnoDB
+> locking better than most people shipping to it.

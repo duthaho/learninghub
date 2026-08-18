@@ -1,0 +1,271 @@
+---
+title: "Data types as a design decision"
+subtitle: "Types aren't cosmetic: they decide correctness, row width, and how much of your data fits in RAM."
+description: "Choosing MySQL data types well: DECIMAL vs FLOAT for money, sizing integers, VARCHAR/CHAR/TEXT, DATETIME vs TIMESTAMP and the 2038 trap, and when ENUM helps."
+level: "Foundations"
+accent: "#00758f"
+readingTime: "10 min read"
+updated: 2026-08-18
+order: 20
+series: "MySQL"
+part: 2
+---
+
+import Callout from '../../components/Callout.astro';
+
+*MySQL deep-dive · Part 2 of 9. Next: [Indexes and the B-tree](/mysql-03-indexes-and-the-b-tree/).*
+
+Picking a column type feels like paperwork. You need to store a price, so you
+reach for a number; you need a name, so you reach for `VARCHAR(255)` because
+that's what the last schema used. It works, the row goes in, you move on. But the
+type you pick isn't a formality — it's a design decision that quietly settles
+three things at once: **whether your data can be wrong, how wide each row is, and
+how much of your table lives in RAM.** Get it wrong and the bill arrives later,
+as a rounding bug in a finance report or a 3 a.m. page when an ID column runs out
+of numbers.
+
+We'll build one table — an `orders` table — column by column, and justify every
+choice. But first, the idea that ties the whole chapter together.
+
+## The mental model: narrower rows fit more in RAM
+
+InnoDB doesn't read your table a row at a time. It reads it a **page** at a time —
+a fixed 16KB block — and caches those pages in memory in the **buffer pool**. In
+[Part 1](/mysql-01-how-innodb-stores-rows/) we saw that your rows physically live inside the
+clustered index, packed into these 16KB pages. That detail is the whole game
+here.
+
+If a row is 200 bytes wide, roughly 80 of them fit in a page. If you bloat that
+same row to 400 bytes with oversized types, only 40 fit. Same data, half the rows
+per page — which means **twice as many pages** to hold the table, twice as many
+page reads to scan it, and half as much of your working set fitting in the buffer
+pool before MySQL has to evict pages and go back to disk.
+
+So "pick the smallest type that fits" isn't premature optimisation or penny-
+pinching. Row width is a multiplier on almost every read your database does.
+Narrower rows → more rows per page → fewer page reads → more of the hot data
+stays resident in RAM. Keep that lever in mind for every column below.
+
+<Callout type="insight" title="Types are the first performance decision you make">
+  You'll spend a lot of time later tuning indexes and queries, but row width is
+  set on day one by your column types — and it's painful to change on a live table
+  with millions of rows. Choosing tight types up front is the cheapest performance
+  work you'll ever do, because you do it before any data exists.
+</Callout>
+
+## Decision 1: money is DECIMAL, never FLOAT
+
+Start with the money column, because it's where the wrong choice does the most
+damage. You need a `total_amount`. The tempting types are `FLOAT` and `DOUBLE` —
+they're numeric, they hold decimals, done. Don't.
+
+`FLOAT` and `DOUBLE` are **binary floating point**. They store numbers in base 2,
+and most decimal fractions have no exact base-2 representation — the same reason
+`0.1 + 0.2` doesn't equal `0.3` in almost every language you've used. Store a
+price as `FLOAT` and you're not storing `19.99`; you're storing the nearest binary
+approximation of it. One value looks fine when you print it. Sum ten thousand of
+them and the tiny errors accumulate into a total that's a cent or two off — and
+now your ledger doesn't reconcile.
+
+`DECIMAL(M,D)` is **exact fixed-point** arithmetic. `M` is the total number of
+digits, `D` is how many sit after the decimal point. `DECIMAL(10,2)` holds up to
+ten digits, two of them cents, so anything up to `99,999,999.99` — exactly, with
+no drift, ever.
+
+```sql
+total_amount  DECIMAL(10,2)  NOT NULL
+```
+
+<Callout type="gotcha" title="FLOAT isn't banned — it's just wrong for money">
+  Binary floats are the right tool for genuinely approximate quantities: sensor
+  readings, latitude/longitude, ML scores, a temperature. There, the value is
+  already fuzzy and you want the compact, fast representation. The rule is narrow:
+  anything you add up, compare for equality, or hand to an accountant goes in
+  `DECIMAL`. Anything that's approximate by nature can be `FLOAT`/`DOUBLE`.
+</Callout>
+
+## Decision 2: size your integers (and reach for UNSIGNED)
+
+Every `orders` table needs a primary key. The lazy choice is `INT`, and it's the
+one that has taken down real systems.
+
+MySQL's integer types differ only in how many bytes they occupy and therefore the
+range they cover:
+
+- `TINYINT` — 1 byte, signed max **127**
+- `INT` — 4 bytes, ~**2.1 billion** signed
+- `BIGINT` — 8 bytes, ~**9.2 quintillion** signed
+
+Here's the classic outage. You define `id INT AUTO_INCREMENT PRIMARY KEY`. A
+signed `INT` tops out at **2,147,483,647**. For a busy, growing table that's not
+a hypothetical ceiling — it's a date on the calendar. The moment the counter
+reaches it, the *next* `INSERT` fails with a duplicate-key error and writes to the
+table simply stop. Nothing warned you; the column just ran out of numbers.
+
+Two fixes, both in the type. First, `UNSIGNED` — an integer that can't go negative
+spends its whole range on positive values, doubling an `INT`'s ceiling to ~4.2
+billion. But for a primary key you expect to grow, go straight to `BIGINT
+UNSIGNED`. Eight bytes buys you a range you will genuinely never exhaust, and
+it's the standard choice for a growing PK.
+
+```sql
+id  BIGINT UNSIGNED  NOT NULL  AUTO_INCREMENT  PRIMARY KEY
+```
+
+That doesn't mean *every* integer should be `BIGINT`. A `status` code with five
+possible values, or a small quantity, fits in a `TINYINT` — and remember Decision
+1's lever: on a table with a hundred million rows, spending 8 bytes where 1 would
+do is 700MB of pure padding, dragged through the buffer pool on every scan. Size
+each integer to its actual domain: tight for bounded values, `BIGINT UNSIGNED`
+for identifiers that only ever climb.
+
+<Callout type="gotcha" title="INT(11) doesn't do what you think">
+  The display-width syntax — `INT(11)`, `TINYINT(4)` — is one of the most
+  misread features in MySQL. That number **never** controlled the range or the
+  storage; an `INT(4)` still holds up to ~2.1 billion and still takes 4 bytes. It
+  was only a hint to some clients about padding on display. It's **deprecated in
+  8.x** and you should ignore it entirely. Range comes from the type
+  (`TINYINT`/`INT`/`BIGINT`), not from the parenthesised number.
+</Callout>
+
+## Decision 3: VARCHAR, CHAR, or TEXT
+
+Now the strings — a `customer_email`, a `currency_code`, maybe a `notes` field.
+Three types, three genuinely different shapes.
+
+**`VARCHAR(n)`** is variable-length and stored inline with the row. The `n` is a
+*maximum*, not a reservation: `VARCHAR(255)` holding `"hi"` costs about the length
+of `"hi"`, not 255 bytes on disk. This is why people assume `n` is free and
+default everything to `VARCHAR(255)`. It isn't free — see the misconception below
+— but on disk it's close, so `VARCHAR` is the right default for genuinely
+variable text like an email address.
+
+**`CHAR(n)`** is fixed-length: it always occupies `n` characters, padding short
+values. That's wasteful for variable data, but it's exactly right when the string
+is *genuinely always the same length* — a two-letter country code (`CHAR(2)`), a
+fixed-width SHA-256 hash (`CHAR(64)`). For those, fixed-length is honest and can
+be marginally more efficient than paying `VARCHAR`'s length overhead.
+
+**`TEXT`** (and `BLOB`) is for large content — article bodies, JSON dumps, long
+notes. InnoDB stores it partly **off-page**: a pointer plus a short prefix live
+inline with the row, and the bulk sits elsewhere. That has real consequences: a
+`TEXT` column **can't have a `DEFAULT`**, and you can only build a **prefix
+index** on it (the first `n` characters), never the full value. So `TEXT` is
+wrong for a short field — reaching for it "just in case" costs you defaults and
+clean indexing for no benefit.
+
+```sql
+customer_email  VARCHAR(320)  NOT NULL,   -- variable text, sized to the real max
+currency_code   CHAR(3)       NOT NULL,   -- always exactly 3 chars (ISO 4217)
+notes           TEXT              NULL     -- genuinely large, off-page, rarely read
+```
+
+<Callout type="note" title="Why VARCHAR length still matters even when disk cost is small">
+  On disk, an under-filled `VARCHAR` is cheap. But the declared length leaks into
+  places you don't see. When MySQL builds an **in-memory temp table** for a sort or
+  a `GROUP BY`, it often allocates the column at its *full declared width*, so
+  `VARCHAR(1000)` can force a fat temp table — or spill it to disk — where
+  `VARCHAR(100)` would have stayed in memory. The length also inflates any index on
+  the column, which ties straight into index size in
+  [Part 3](/mysql-03-indexes-and-the-b-tree/). Declare the smallest `n` your data
+  actually needs.
+</Callout>
+
+## Decision 4: DATETIME vs TIMESTAMP (and the 2038 trap)
+
+Every order has a `created_at`. MySQL offers two temporal types that look
+interchangeable and behave very differently.
+
+**`DATETIME`** takes 5 bytes, covers years **1000 to 9999**, and stores exactly
+what you give it — **no timezone conversion**. What you write is what you read
+back, byte for byte.
+
+**`TIMESTAMP`** takes 4 bytes but carries two catches. First, its range ends at
+**2038-01-19** — the famous **epoch-overflow** problem, because it's stored as a
+32-bit count of seconds since 1970. Any timestamp you try to store past that date
+overflows. Second, `TIMESTAMP` **auto-converts**: it takes your value as the
+session's timezone, stores it as UTC, and converts back to the session timezone on
+read. Convenient until two app servers with different session timezones disagree
+about what a stored value means.
+
+The common modern practice sidesteps both: use **`DATETIME`, store UTC
+explicitly, and let the application own all timezone conversion.** You give up
+`TIMESTAMP`'s automatic UTC handling in exchange for values that are unambiguous,
+survive past 2038, and mean the same thing no matter which server reads them.
+
+```sql
+created_at  DATETIME  NOT NULL  DEFAULT (UTC_TIMESTAMP())
+```
+
+<Callout type="gotcha" title="The 2038 problem is already in your codebase">
+  2038 sounds comfortably distant, but a `TIMESTAMP` column breaks the moment it
+  has to *hold* a post-2038 value — a 20-year subscription expiry, a long-dated
+  contract, a "renews in 2040" field. Those rows fail to store *today*. If a column
+  can hold a future date, `TIMESTAMP` is a latent bug with a deadline; prefer
+  `DATETIME`.
+</Callout>
+
+## When ENUM earns its place
+
+Orders have a `status`: `'pending'`, `'paid'`, `'shipped'`, `'cancelled'`. You
+could store that as a `VARCHAR`, or as an `ENUM`.
+
+`ENUM` is appealing: it's stored compactly as a small **integer** under the hood
+(not the full string), it's self-documenting right there in the schema, and it
+rejects any value not in the list — validation for free. The catches are real,
+though. Adding a value means an **`ALTER TABLE`**. It **sorts by internal index
+order**, not alphabetically — `ORDER BY status` follows declaration order, which
+surprises people. And it's **non-portable**, so migrating to another database is
+friction.
+
+The heuristic: `ENUM` is fine for a **small, rarely-changing** set — an order
+status, a yes/no/maybe. The moment the list evolves regularly, or other tables
+need to reference it, promote it to a proper **lookup table** with a foreign key.
+
+```sql
+status  ENUM('pending','paid','shipped','cancelled')  NOT NULL  DEFAULT 'pending'
+```
+
+## The finished table
+
+Every choice above, assembled and justified:
+
+```sql
+CREATE TABLE orders (
+  id              BIGINT UNSIGNED  NOT NULL  AUTO_INCREMENT,   -- growing PK, never runs out
+  customer_email  VARCHAR(320)     NOT NULL,                   -- variable text, real max
+  currency_code   CHAR(3)          NOT NULL,                   -- always exactly 3 (ISO 4217)
+  total_amount    DECIMAL(10,2)    NOT NULL,                   -- exact money, no drift
+  status          ENUM('pending','paid','shipped','cancelled')
+                                   NOT NULL DEFAULT 'pending',  -- small, rarely-changing set
+  notes           TEXT                 NULL,                    -- large, off-page, rarely read
+  created_at      DATETIME         NOT NULL DEFAULT (UTC_TIMESTAMP())  -- UTC, survives 2038
+) ENGINE=InnoDB;
+```
+
+Nothing here is `VARCHAR(255)` by reflex. Each type is the smallest one that fits
+its domain, which keeps the row narrow, keeps more of the table in the buffer
+pool, and — just as important — makes wrong data impossible to insert in the first
+place.
+
+## The misconception to bust: "VARCHAR(255) is the safe default"
+
+The most common schema habit is to make every string `VARCHAR(255)` on the theory
+that `n` is a free maximum, so bigger is safer. Both halves are wrong.
+
+Bigger isn't free. As we saw in Decision 3, an oversized `VARCHAR` inflates
+in-memory temp tables (allocated at full declared width), pushes sorts and
+`GROUP BY`s to spill to disk, and bloats every index on the column. The cost is
+just invisible until a query gets slow.
+
+And "safe" is backwards. A type isn't only storage — it's a **constraint**. A
+column sized to its real domain rejects garbage: `CHAR(3)` for a currency code
+won't accept a 40-character string; `TINYINT UNSIGNED` won't accept a negative
+quantity; `DECIMAL(10,2)` won't silently drift. Oversizing everything throws that
+validation away and lets bad data walk straight in. The safe default is the
+opposite instinct: **pick the smallest type that fits the domain**, and let the
+type do the checking for you.
+
+> If you can say why money is `DECIMAL`, why a growing PK is `BIGINT UNSIGNED`,
+> and why `VARCHAR(255)` isn't a free lunch, you're no longer filling in
+> paperwork — you're designing the table.

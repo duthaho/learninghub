@@ -1,0 +1,239 @@
+---
+title: "How InnoDB stores your rows"
+subtitle: "The table IS its primary-key index — and why that one fact explains write speed, index size, and your choice of key."
+description: "A mental-model-first look at InnoDB storage: the clustered index, why rows are physically ordered by the primary key, how secondary indexes work, and why a random UUID key hurts writes."
+level: "Foundations · Beginner-friendly"
+accent: "#00758f"
+readingTime: "10 min read"
+updated: 2026-08-18
+order: 19
+series: "MySQL"
+part: 1
+---
+
+import Callout from '../../components/Callout.astro';
+
+*MySQL deep-dive · Part 1 of 9. Next: [Data types as a design decision](/mysql-02-data-types/).*
+
+Most people picture a database table as a spreadsheet: rows sitting in a heap
+somewhere on disk, and indexes as separate little lookup books off to the side
+that point back into that heap. For a lot of storage engines that picture is
+roughly right. For InnoDB — the default engine in MySQL, and the one you're
+almost certainly using — it's wrong in a way that matters. In InnoDB, **the table
+_is_ an index.** There's no separate heap of rows. The rows live _inside_ the
+primary-key index, physically ordered by the primary key. Hold onto that
+sentence: your write speed, your index sizes, and whether a `UUID` key is a
+mistake all fall out of it.
+
+We'll hang the examples on a schema you already have in your head: a backend API
+with a `users` table and an `orders` table.
+
+```sql
+CREATE TABLE users (
+  id         BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  email      VARCHAR(255) NOT NULL,
+  created_at DATETIME NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY idx_email (email)
+);
+```
+
+## The mental model: the table is a clustered index
+
+InnoDB stores every table as a **clustered index** — a B-tree keyed on the
+primary key. The interesting part is what lives at the bottom of that tree. In a
+normal index, the leaf nodes hold the key plus a pointer to the row. In InnoDB's
+clustered index, **the leaf nodes hold the entire row.** The full record — every
+column — is stored right there, in the primary-key B-tree, sorted by the primary
+key.
+
+So when you look up `users` by `id`, InnoDB walks the B-tree from the root down to
+a leaf and the row is _already there_. There's no second hop to go fetch it from
+somewhere else. The primary-key lookup is as fast as a lookup can be, because the
+index and the data are the same structure.
+
+<Callout type="insight" title="'Physically ordered' is literal">
+  The rows aren't just logically sorted by primary key — they're stored in that
+  order, next to each other, on disk and in memory. Reading `WHERE id BETWEEN
+  1000 AND 2000` is a near-sequential scan of adjacent data, which is why range
+  scans on the primary key are so cheap. This is also why you don't get to pick
+  a "no primary key" table for free: if you don't declare one, InnoDB quietly
+  invents a hidden 6-byte one to cluster on, because it needs _something_ to be
+  the physical order.
+</Callout>
+
+Everything else about InnoDB storage is a consequence of this one design choice.
+Once the data lives inside the primary-key tree, two questions follow
+immediately: what does a _second_ index look like, and what happens when you
+insert a row whose key doesn't belong at the end?
+
+## Secondary indexes store the primary key, not a row pointer
+
+You put a `UNIQUE KEY` on `email` above. That's a **secondary index** — its own
+separate B-tree, keyed on `email`. But here's the twist that trips people up:
+its leaves don't point at a disk location for the row. They store the
+**primary-key value.**
+
+```
+clustered index (the table)          secondary index (idx_email)
+key: id      → full row              key: email        → id
+  1          → {1, a@x.com, ...}       a@x.com         → 1
+  2          → {2, b@x.com, ...}       b@x.com         → 2
+  3          → {3, c@x.com, ...}       c@x.com         → 3
+```
+
+Why store the PK instead of a physical pointer? Because rows _move_. Remember
+that the clustered index keeps rows physically ordered — an insert can shuffle
+where a row physically sits (more on that in a second). If secondary indexes held
+raw disk addresses, every one of them would need updating whenever a row shifted.
+By storing the stable primary-key value instead, secondary indexes never care
+where a row physically lives.
+
+The cost of that stability shows up on reads. When you run:
+
+```sql
+SELECT created_at FROM users WHERE email = 'a@x.com';
+```
+
+InnoDB does **two** lookups. First it walks `idx_email` to find `email =
+'a@x.com'`, which gives it back the value `id = 1`. Then, because `created_at`
+isn't stored in the secondary index, it walks the clustered index _again_ using
+`id = 1` to fetch the full row. That second hop is called a **bookmark lookup**
+(or "index-back-to-table" lookup), and it's the reason a query that "used the
+index" can still be slower than you expected.
+
+<Callout type="insight" title="Covering indexes skip the second hop">
+  If every column a query needs is already _in_ the secondary index, InnoDB never
+  has to visit the clustered index at all — the index "covers" the query. Adding
+  `created_at` to the index (`INDEX idx_email_created (email, created_at)`) means
+  the `SELECT` above is answered entirely from `idx_email_created`, with no
+  bookmark lookup. This is why "just add the column to the index" is such a
+  common performance win: you're not making the lookup faster, you're deleting
+  the second lookup entirely.
+</Callout>
+
+## The 16KB page, and what a page split costs
+
+InnoDB doesn't read or write single rows. It works in **pages** — fixed-size
+blocks, 16KB each by default. A page is the unit of I/O and the unit of caching:
+the buffer pool (InnoDB's in-memory cache) holds pages, the disk stores pages,
+and a leaf node of the clustered index _is_ a page holding a run of consecutive
+rows.
+
+Now think about inserting a new row. The row has to go into the correct place in
+the clustered index — remember, physical order is by primary key. Where it lands
+depends entirely on the key.
+
+**Sequential keys (`BIGINT AUTO_INCREMENT`).** Every new `id` is larger than
+every existing one, so every new row belongs at the very end of the B-tree — the
+rightmost leaf page. InnoDB appends to that page until it's full (it fills pages
+to roughly 15/16 for sequential inserts), then starts a fresh page. Inserts touch
+one hot page at a time; the rest of the tree is untouched. This is about the best
+case a B-tree can offer.
+
+**Random keys (a `UUIDv4`).** A random UUID belongs _somewhere in the middle_ of
+the sorted order — a different somewhere every time. Sooner or later a new key
+needs to go into a page that's already full. InnoDB can't just grow the page, so
+it does a **page split**: it allocates a new 16KB page, moves roughly half the
+rows into it, and inserts the new row. You now have two pages that are each only
+about half full.
+
+That page split is the whole story of why random keys hurt writes:
+
+- **More I/O per insert.** One logical insert becomes: read the target page,
+  allocate a page, rewrite two pages, update the parent node.
+- **Fragmentation and bloat.** Pages sitting half-full mean the same rows occupy
+  far more pages. The table on disk grows larger than the same data with a
+  sequential key.
+- **A colder cache.** Random inserts touch pages scattered all across the tree,
+  so the working set no longer fits neatly in the buffer pool. Your cache hit
+  rate drops, and now you're hitting disk on reads too.
+
+<Callout type="gotcha" title="A random PK is a tax on every index, not just writes">
+  It gets worse than page splits. Every secondary index stores the primary-key
+  value in its leaves (that's the whole previous section). So a fat primary key
+  is _copied into every secondary index you have._ Use a `CHAR(36)` text UUID as
+  your PK and each secondary index carries 36 bytes of key per row, versus 8
+  bytes for a `BIGINT`. Three secondary indexes on a big table, and you've
+  quietly multiplied that overhead across all of them — more disk, more memory,
+  fewer rows per page, more I/O everywhere.
+</Callout>
+
+### The two rules a primary key wants to satisfy
+
+Put the storage facts together and the primary key has two jobs, and both come
+straight from the clustered-index design:
+
+1. **Be small** — because its value is duplicated into every secondary index.
+2. **Insert in order** — because physical ordering means out-of-order inserts
+   cause page splits.
+
+A `BIGINT AUTO_INCREMENT` nails both: 8 bytes, always ascending. That's why it's
+the boring default, and the boring default is usually right.
+
+## But UUIDs aren't the villain — randomness is
+
+Here's where the common advice goes too far. You'll hear "UUIDs are bad for
+MySQL, don't use them." That's the wrong lesson. Re-read the two rules: nothing
+there says "no UUIDs." It says small, and in-order. A UUID can satisfy both if
+you stop making two specific mistakes.
+
+**Mistake one: storing the UUID as text.** A UUID written out as
+`550e8400-e29b-41d4-a716-446655440000` is 36 characters. Stored as `CHAR(36)`
+that's 36 bytes, and it's what bloats every secondary index. But a UUID is really
+just 128 bits — 16 bytes. Store it as **`BINARY(16)`** and it's 2.25x smaller,
+right in the neighbourhood of a `BIGINT`. MySQL even ships helpers,
+`UUID_TO_BIN()` and `BIN_TO_UUID()`, to convert at the edges so your application
+still sees the friendly string form.
+
+**Mistake two: using a _random_ UUID.** A `UUIDv4` is random by design, and
+randomness is exactly what triggers page splits. But not all UUIDs are random.
+**`UUIDv7`** is time-ordered: its leading bits are a millisecond timestamp, so
+new values sort _after_ recent ones and insert near-sequentially — appending to
+the hot rightmost page, just like `AUTO_INCREMENT`, splits mostly avoided. (An
+older trick reorders the bits of a `UUIDv1` to move its timestamp to the front,
+via `UUID_TO_BIN(uuid, 1)`, for the same effect.)
+
+```sql
+CREATE TABLE orders (
+  id         BINARY(16) NOT NULL,   -- a UUIDv7, stored as 16 bytes
+  user_id    BIGINT UNSIGNED NOT NULL,
+  total      DECIMAL(10,2) NOT NULL,
+  created_at DATETIME NOT NULL,
+  PRIMARY KEY (id),
+  KEY idx_user (user_id)
+);
+```
+
+This `orders` table gets what people actually want from UUIDs — globally unique
+IDs you can generate in the application, without a round-trip to the database and
+without leaking a guessable sequential count to the world — while keeping a
+primary key that's small (16 bytes) and insert-ordered (time-prefixed). The two
+rules are satisfied; the storage engine is happy.
+
+<Callout type="note" title="The misconception, stated plainly">
+  "UUIDs are bad for MySQL, period" is a myth. The enemy was never the UUID — it
+  was **randomness in the primary key** (splits, fragmentation, cache misses) and
+  **an oversized key** (36-byte text bloating every index). A `UUIDv4` stored as
+  `CHAR(36)` hits both problems and earned the bad reputation. A `UUIDv7` stored
+  as `BINARY(16)` hits neither. Same acronym, completely different physics.
+</Callout>
+
+## Where this goes next
+
+Everything above is a consequence of one fact: the table is its primary-key
+index, and the rows live sorted inside it. Primary-key lookups are cheap because
+the data is right there. Secondary indexes carry the PK and pay a bookmark
+lookup, which is why covering indexes matter. Inserts fill pages, and
+out-of-order inserts split them, which is why your choice of key drives write
+speed and total size.
+
+Next we go one level down, to the columns themselves: how the _types_ you pick —
+`INT` vs `BIGINT`, `VARCHAR` vs `CHAR`, `DATETIME` vs `TIMESTAMP` — decide how
+many rows fit on each 16KB page, and why data types are a design decision, not a
+formality.
+
+> If you can explain why a `BIGINT AUTO_INCREMENT` insert touches one page while
+> a random `UUIDv4` insert splits one, and why a `UUIDv7` in `BINARY(16)` gets
+> you back to the good case, you already understand InnoDB storage better than
+> most people who use it daily.
