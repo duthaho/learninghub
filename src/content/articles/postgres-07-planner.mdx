@@ -1,0 +1,278 @@
+---
+title: "The planner and where estimates come from"
+subtitle: "Every bad plan traces back to one wrong number. Understanding where that number comes from is how you fix it without adding hints."
+description: "How Postgres produces row estimates: pg_statistic, MCV lists, histograms, the independence assumption, extended statistics, and when each of the three join methods wins."
+level: "Advanced"
+accent: "#336791"
+readingTime: "15 min read"
+updated: 2026-09-07
+order: 57
+series: "Postgres"
+part: 7
+---
+
+import Callout from '../../components/Callout.astro';
+
+*Postgres deep-dive · Part 7 of 11. Prev: [Reading EXPLAIN ANALYZE](/postgres-06-explain/). Next: [Transactions, isolation, and locking](/postgres-08-transactions/).*
+
+Part 6 told you how to find the wrong estimate. This part explains where the
+estimate came from and how to fix it. Postgres ships no query hints. The
+intended fix for a bad plan is always to give the planner better information —
+correct statistics, extended statistics for correlated columns, or a fresh
+`ANALYZE` after a large load. Understanding the planner's belief system is how
+you supply the right information.
+
+## pg_statistic: where estimates live
+
+`ANALYZE` samples the table and stores per-column statistics in `pg_statistic`
+(user-friendly view: `pg_stats`). For each column, it computes:
+
+- **`null_frac`** — fraction of rows where this column is NULL
+- **`n_distinct`** — estimated number of distinct values (negative = fraction
+  of rows: `-0.3` means 30% of rows have a distinct value)
+- **`most_common_vals` (MCV list)** — the N most common values
+- **`most_common_freqs`** — the frequency of each MCV value
+- **`histogram_bounds`** — equal-frequency bucket boundaries for range queries
+- **`correlation`** — correlation between logical sort order and physical page
+  order (−1 to 1; 1.0 = perfectly sequential; 0 = random)
+
+```sql
+-- Inspect the statistics for a column
+SELECT
+  n_distinct,
+  null_frac,
+  most_common_vals,
+  most_common_freqs,
+  histogram_bounds,
+  correlation
+FROM pg_stats
+WHERE tablename = 'orders'
+  AND attname = 'status';
+```
+
+## How selectivity falls out of statistics
+
+For an equality predicate `WHERE status = 'pending'`:
+
+1. Is `'pending'` in the MCV list? If yes, use the stored frequency directly.
+   The estimate is exact for values that made the MCV list.
+2. If not in MCV: assume uniform distribution among the non-MCV values:
+   `(1 - sum(mcv_freqs) - null_frac) / (n_distinct - n_mcv_count)`.
+
+For a range predicate `WHERE created_at > '2026-09-01'`:
+The planner uses the histogram to estimate what fraction of rows fall in the
+range. The histogram buckets are equal-frequency, so this estimate is generally
+good for uniformly distributed data.
+
+## The statistics target knob
+
+The default `statistics_target` is 100, meaning the MCV list holds up to 100
+entries and the histogram has ~100 buckets. For a `status` column with 5 values,
+that's plenty. For a `country_code` column with 240 values or a skewed `product_id`
+where 100 values account for 80% of rows, the MCV list overflows and the
+"uniform among remainder" assumption breaks down.
+
+Fix: raise the statistics target for the column.
+
+```sql
+-- Increase to 1000 for a high-cardinality skewed column
+ALTER TABLE orders ALTER COLUMN product_id SET STATISTICS 1000;
+ANALYZE orders;
+
+-- Check what changed
+SELECT array_length(most_common_vals, 1) AS mcv_count
+FROM pg_stats
+WHERE tablename = 'orders' AND attname = 'product_id';
+```
+
+After a large data load, run `ANALYZE` explicitly — autovacuum analyzes at ~10%
+row change, but the gap between load and first autovacuum analyze can be hours
+of bad plans on a 100M-row table.
+
+## The independence assumption: multi-column failure mode
+
+Here is the most common source of major plan errors in production Postgres.
+
+When a `WHERE` clause has multiple predicates, the planner multiplies their
+selectivities as if they were independent:
+
+```
+P(make='Toyota' AND model='Corolla') ≈ P(make='Toyota') × P(model='Corolla')
+                                     ≈ 0.05 × 0.01
+                                     = 0.0005
+```
+
+But `make` and `model` are **correlated**: every Corolla is a Toyota. The true
+selectivity is closer to `P(model='Corolla') = 0.01`. The planner underestimates
+by 20×. At 20× underestimate, it believes the join will touch 500 rows when it
+touches 10,000. It chooses a Nested Loop (optimal for small outer sets) when a
+Hash Join would be faster.
+
+The EXPLAIN signature: at a NLJ node, `rows=50 actual=9642`. The planner chose
+NLJ because it believed there were 50 outer rows. At 9,642 rows, NLJ costs
+50× more than the estimate.
+
+```sql
+-- Reproduce: table with make/model data
+-- Estimate with fresh single-column stats:
+EXPLAIN SELECT * FROM cars WHERE make = 'Toyota' AND model = 'Corolla';
+-- rows=5  ← wrong: 0.05 × 0.01 × total
+
+-- Fix: create extended statistics for the correlation
+CREATE STATISTICS st_cars_make_model (dependencies)
+  ON make, model
+  FROM cars;
+ANALYZE cars;
+
+-- Re-estimate:
+EXPLAIN SELECT * FROM cars WHERE make = 'Toyota' AND model = 'Corolla';
+-- rows=1243  ← much closer to reality
+```
+
+MySQL has no equivalent to extended statistics. This is a meaningful Postgres
+advantage for complex multi-column predicates.
+
+Three variants of extended statistics:
+
+- **`dependencies`** — functional dependency between columns (make→model)
+- **`ndistinct`** — improves GROUP BY row estimates for correlated columns
+- **`mcv`** — joint most-common-value list for combination predicates
+
+<Callout type="insight" title="ANALYZE alone can't fix correlated predicates">
+  Running `ANALYZE` updates per-column statistics. It has no concept of
+  cross-column correlations — each column's stats are computed independently.
+  For correlated columns, `ANALYZE` always leaves the independence assumption
+  in place. `CREATE STATISTICS` is the only fix; it's separate from and
+  additive to `ANALYZE`.
+</Callout>
+
+## The three join methods
+
+The planner chooses among three join algorithms based on the estimated sizes and
+available indexes on the join inputs.
+
+### Nested Loop Join
+
+```
+cost = outer_rows × cost_per_inner_lookup
+```
+
+Iterate over the outer set; for each outer row, do one index lookup on the inner
+table. Cost scales linearly with outer row count. **Wins when**: small outer set
+(OLTP point joins, PK lookups by foreign key). **Loses when**: outer set is
+large — the cost multiplies.
+
+The classic bad plan: planner estimates 3 outer rows, chooses NLJ, actual outer
+rows = 9,642, total cost = 9,642 × inner_lookup_cost.
+
+```
+Nested Loop  (cost=... rows=3 ...)
+             (actual time=4821.3 loops=1 rows=9642)
+  -- 4.8 seconds. Hash join would have taken ~50ms.
+```
+
+### Hash Join
+
+Build a hash table from the smaller input; probe it with each row of the larger
+input. **Wins for**: large × large unsorted equality joins. Cost scales with
+table sizes, not with their product. The hash table lives in `work_mem`.
+
+```
+Batches: 1  Memory Usage: 4096kB    ← fits in work_mem, fully in memory
+Batches: 8  Memory Usage: 4096kB    ← hash partitioned to disk
+```
+
+`Batches > 1` means the hash table exceeded `work_mem` and spilled to disk.
+Each batch requires re-reading both inputs. Fix: increase `work_mem` for the
+session. But `work_mem` is per-sort/hash-node per-backend — a global increase
+multiplies by concurrent connections. Set it per-session for known heavy queries:
+
+```sql
+SET work_mem = '256MB';
+-- run the expensive analytics query
+RESET work_mem;
+```
+
+### Merge Join
+
+Sort (or reuse existing order) both inputs, then zip them once. **Wins when**:
+both inputs are already ordered (from an index scan, or a prior sort), or when
+the output needs to be sorted anyway (ORDER BY on the join key). For pre-sorted
+inputs, merge join is extremely efficient — one linear pass over both.
+
+### Parallel query
+
+A `Gather` or `Gather Merge` node fans the plan out to parallel workers.
+Free analytics speedup for full scans and aggregations. Controlled by
+`max_parallel_workers_per_gather` (default 2). Irrelevant for point queries
+(startup cost exceeds the work done). Postgres decides automatically when to
+parallelize based on estimated cost.
+
+<Callout type="gotcha" title="work_mem is per-sort-node per-backend, not global">
+  `SET work_mem = '512MB'` doesn't give the backend 512MB. A query with three
+  Sort nodes and two Hash Join nodes can use `5 × 512MB = 2.5GB`. Multiply that
+  by concurrent connections and you exceed RAM. The safe pattern for heavy
+  analytics: set work_mem for that session, run the query, reset immediately.
+  Never blindly raise the global default without modeling the maximum per-query
+  × per-backend × concurrent-connections footprint.
+</Callout>
+
+## The `correlation` statistic and physical ordering
+
+`correlation` in `pg_stats` measures how well the physical page order of a
+column matches its logical sort order. `1.0` = rows are physically sorted by
+this column. `0` = random.
+
+The planner uses `correlation` to decide whether an index scan or a seq scan
+is cheaper for a range query. A highly correlated column (like a
+`GENERATED ALWAYS AS IDENTITY` id or a `created_at` on an append-only table)
+has correlation near 1.0: an index scan touches pages sequentially — cheap.
+A randomly-ordered column has correlation near 0: an index scan on a range
+touches scattered pages — potentially more expensive than a seq scan.
+
+This is also why BRIN works or doesn't (Part 5): BRIN's block-range min/max
+assumption is only tight when correlation is high.
+
+## Diagnosing the three causes of bad estimates
+
+When estimates are consistently wrong after a fresh `ANALYZE`, the root cause
+is one of three named things:
+
+1. **Skew beyond MCV capacity**: `n_distinct` is large, skew is heavy, and the
+   top 100 MCV slots don't cover the important values. Fix: `SET STATISTICS
+   1000` on the column.
+
+2. **Correlated predicates**: two or more columns in the WHERE clause are
+   statistically dependent. Per-column stats can't capture this. Fix: `CREATE
+   STATISTICS (dependencies)` on the column pair.
+
+3. **Planner-opaque expressions**: `WHERE lower(email) = 'alice@example.com'`
+   on a plain `email` index — the planner can't see through the function to use
+   the column's stats or the index. Fix: expression index matching the query
+   form, and optionally expression statistics.
+
+```sql
+-- Check if extended statistics exist:
+SELECT stxname, stxkeys, stxkind
+FROM pg_statistic_ext
+WHERE stxrelid = 'orders'::regclass;
+```
+
+## The misconception
+
+> "We ran ANALYZE and the estimate is still wrong — the Postgres planner is bad."
+
+When fresh statistics still produce wrong estimates, it's one of the three
+causes above — not a planner deficiency. The planner computes correctly from
+the information it has. Supplying correct and complete information (extended
+statistics, higher statistics target, fresh analyze after bulk loads) closes
+the gap. The absence of query hints in Postgres is intentional: the Postgres
+team's bet is that a planner with good statistics is more reliable than a planner
+with arbitrary developer hints.
+
+## Where this goes next
+
+Parts 6 and 7 cover the performance diagnostic stack. Part 8 shifts from
+performance to correctness: what isolation level does Postgres actually use by
+default, how does its SERIALIZABLE differ from MySQL's gap-lock approach, and
+what does `FOR UPDATE SKIP LOCKED` unlock for work queues.

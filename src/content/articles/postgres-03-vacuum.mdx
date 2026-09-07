@@ -1,0 +1,268 @@
+---
+title: "VACUUM, autovacuum, and the dead-tuple problem"
+subtitle: "Vacuum doesn't shrink your table — it recycles space, keeps the visibility map current, and fights the one failure mode that can stop all writes."
+description: "How Postgres VACUUM works: dead-tuple cleanup, the Free Space Map, HOT updates and fillfactor, autovacuum tuning, and XID wraparound — the failure mode vacuum exists to prevent."
+level: "Core"
+accent: "#336791"
+readingTime: "14 min read"
+updated: 2026-09-07
+order: 53
+series: "Postgres"
+part: 3
+---
+
+import Callout from '../../components/Callout.astro';
+
+*Postgres deep-dive · Part 3 of 11. Prev: [MVCC: row versions in the heap](/postgres-02-mvcc/). Next: [Data types as design decisions](/postgres-04-data-types/).*
+
+Part 2 established that Postgres never modifies a row in place: every UPDATE
+writes a new tuple and marks the old one deleted. Every DELETE marks a tuple
+deleted without removing it. Those marked-but-not-removed tuples are **dead
+tuples**, and they pile up in the heap indefinitely until something cleans them
+out.
+
+That something is VACUUM. Understanding it is not optional — autovacuum is on by
+default, it consumes real I/O, and the one place it *can't* run has consequences
+severe enough to halt all writes on your database. This is the most
+operationally important concept in the Postgres storage model.
+
+## What VACUUM actually does
+
+VACUUM scans heap pages looking for dead tuples — ones whose `xmax` points at
+a committed XID that's older than every open snapshot (so truly no one can see
+them). It removes them and records the freed space in the **Free Space Map
+(FSM)**, a per-table structure that tracks which pages have room for new tuples.
+When the next INSERT or UPDATE needs space, Postgres consults the FSM to find
+a page with room, rather than always appending.
+
+Critically: **VACUUM does not shrink the file**. A table that bloated to 10GB
+from a large DELETE storm stays at 10GB on disk after VACUUM. The pages are
+marked reusable in the FSM, so future writes fill the holes, but the disk
+allocation remains. This is by design — returning pages to the OS requires
+rewriting the entire table under an exclusive lock.
+
+That's `VACUUM FULL`, and it *does* shrink the file, but at a steep cost:
+exclusive lock (no reads, no writes for the duration), full table rewrite. It's
+a maintenance-window operation, not a routine one.
+
+```sql
+-- How much bloat is there right now?
+SELECT relname,
+       n_live_tup,
+       n_dead_tup,
+       pg_size_pretty(pg_total_relation_size(oid)) AS total_size,
+       last_autovacuum
+FROM pg_stat_user_tables
+ORDER BY n_dead_tup DESC;
+```
+
+## The visibility map and index-only scans
+
+VACUUM maintains a second per-table structure: the **Visibility Map (VM)**.
+For each heap page, the VM records one bit: "all tuples on this page are visible
+to every current and future transaction" — meaning the page has no dead tuples
+and no in-progress uncommitted data.
+
+Why does this matter? Because index-only scans depend on it.
+
+When an index covers a query (the index holds all the columns the query needs),
+Postgres can in principle answer the query entirely from the index without
+touching the heap. But index entries don't carry visibility information — `xmin`
+and `xmax` are heap-tuple fields. To verify that a row is actually visible, the
+executor would normally need to fetch the heap page.
+
+The VM short-circuits this. If the VM says a page is all-visible, every tuple
+on it is visible to everyone, so no heap fetch is needed — the index-only scan
+is truly heap-free. For pages not marked all-visible (recently modified, with
+in-progress tuples), the executor falls back to fetching the heap.
+
+```sql
+-- Index-only scan diagnostic: Heap Fetches > 0 means dirty pages
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT id, total FROM orders WHERE user_id = 42;
+
+-- Look for:
+-- Index Only Scan using idx_orders_user_id on orders
+--   Heap Fetches: 0  ← clean, all-visible pages
+--   Heap Fetches: 4823  ← VM dirty, vacuum is behind
+```
+
+A table that isn't being vacuumed regularly silently loses its index-only scans.
+The index still exists; the planner still chooses it; but the executor fetches
+heap pages for every row because the VM is dirty. Part 6 (EXPLAIN) shows you
+how to spot this.
+
+## HOT updates: the escape from the full-UPDATE fan-out
+
+Part 2 noted that an UPDATE rewrites all columns and fans out to every index.
+This is expensive, and Postgres has an optimization that bypasses most of it:
+**Heap-Only Tuple (HOT) updates**.
+
+HOT applies when two conditions are met simultaneously:
+1. **No indexed column changed.** None of the columns that appear in any index
+   on the table were modified.
+2. **New tuple fits on the same page.** There's room on the same heap page as
+   the old tuple.
+
+When both conditions hold, Postgres chains the new version to the old one on
+the same page. Index entries keep pointing at the original TID. New index
+writes: zero. The old HOT chain entries get cleaned opportunistically during
+normal page access (page pruning), without waiting for a vacuum pass.
+
+The performance difference for update-heavy tables is significant. An UPDATE
+to `last_login` on a `users` table where `last_login` isn't indexed can be HOT
+— minimal write amplification. The same update on a table with a single
+expression index on `last_login` breaks HOT condition 1.
+
+<Callout type="gotcha" title="HOT breaks the moment any index touches the column">
+  HOT condition 1 is "no indexed column changed." "Indexed" includes any index
+  on the table that references that column — a single-column index, a composite
+  index where the column appears anywhere, or an expression index where the
+  column is part of the expression. Changing `last_login` when there's a
+  composite index on `(user_id, last_login)` breaks HOT for the whole row.
+  Check `\d tablename` to see every index before deciding whether a column is
+  HOT-eligible.
+</Callout>
+
+### fillfactor: reserving space for HOT condition 2
+
+HOT condition 2 requires room on the same page. If you inserted rows at 100%
+fill (the default), there may be no room. Fix: set a lower `fillfactor` when
+creating a hot-update table:
+
+```sql
+CREATE TABLE sessions (
+  id         uuid PRIMARY KEY DEFAULT uuidv7(),
+  user_id    bigint NOT NULL,
+  last_seen  timestamptz NOT NULL,
+  data       jsonb
+) WITH (fillfactor = 80);
+```
+
+`fillfactor = 80` reserves 20% of each page empty at insert time. When an
+UPDATE arrives, the new tuple fits on the same page, satisfying condition 2.
+The standard advice for tables with frequent updates to non-indexed columns:
+`fillfactor = 70` to `fillfactor = 80`.
+
+## Autovacuum tuning for large tables
+
+Autovacuum triggers a vacuum pass on a table when the dead-tuple count exceeds:
+
+```
+autovacuum_vacuum_threshold + autovacuum_vacuum_scale_factor × n_live_tup
+```
+
+The defaults are `50 + 0.2 × n_live_tup`. For a 500-million-row table, that
+means waiting for **100 million dead tuples** before autovacuum fires. That's
+table-level bloat measured in gigabytes.
+
+The fix for large hot tables: per-table scale factor override.
+
+```sql
+ALTER TABLE orders SET (
+  autovacuum_vacuum_scale_factor = 0.01,   -- trigger at 1%, not 20%
+  autovacuum_vacuum_cost_limit   = 400     -- allow more I/O per pass
+);
+```
+
+Set the scale factor to `0.01` and autovacuum fires at 5 million dead tuples
+on that table instead of 100 million. It runs more frequently in smaller bites,
+and your table never bloats as badly between passes.
+
+## The xmin horizon: long transactions block vacuum cluster-wide
+
+Vacuum can only remove a dead tuple when that tuple is invisible to *all*
+currently open snapshots. The oldest open snapshot establishes the **xmin
+horizon**: vacuum will not remove anything deleted after that snapshot started.
+
+A transaction left open for hours — a long-running report, an idle transaction
+from a crashed application — pins the xmin horizon at the moment it started.
+Vacuum runs across the whole cluster but cannot reclaim any dead tuple younger
+than that horizon. Every table in the database accumulates bloat for the
+duration of that open transaction.
+
+```sql
+-- Find the bloat-pinning transaction
+SELECT pid,
+       now() - xact_start      AS txn_age,
+       now() - state_change     AS state_age,
+       state,
+       left(query, 80)         AS query
+FROM pg_stat_activity
+WHERE xact_start IS NOT NULL
+ORDER BY xact_start
+LIMIT 10;
+```
+
+One 8-hour open transaction can cause gigabytes of bloat across the whole
+cluster. Kill idle transactions or set statement/idle-in-transaction timeouts
+at the session level:
+
+```sql
+-- In postgresql.conf or per-role:
+idle_in_transaction_session_timeout = '10min'
+```
+
+## XID wraparound: the failure mode vacuum prevents
+
+Transaction IDs in Postgres are 32-bit unsigned integers. After approximately
+2 billion transactions, a new XID would wrap around and look *older* than
+existing committed XIDs. Committed rows would appear invisible — as if they
+hadn't happened yet. The database would be unreadable.
+
+The defense is **freezing**. When vacuum runs, it looks for tuples whose `xmin`
+is old enough that every running transaction can definitely see them (they're
+committed and far enough in the past). It marks those tuples "frozen" — exempt
+from XID comparison. Frozen tuples will always be visible, regardless of future
+XID values.
+
+Autovacuum monitors the **age** of each table's oldest unfrozen tuple
+(`age(relfrozenxid)` in `pg_class`). When this approaches
+`autovacuum_freeze_max_age` (default ~200M transactions), autovacuum fires an
+aggressive freeze pass on the table regardless of dead-tuple count.
+
+If *that* is blocked — by a disabled autovacuum, a locked table, or extreme
+I/O saturation — Postgres approaches the danger zone. At about 3 million XIDs
+remaining before wraparound, Postgres enters **read-only mode** for writes:
+new write transactions are refused, but reads still work. This is the failsafe.
+
+```sql
+-- Monitor age of each table (alert if > 1.5 billion)
+SELECT relname,
+       age(relfrozenxid)           AS xid_age,
+       pg_size_pretty(pg_total_relation_size(oid)) AS size
+FROM pg_class
+WHERE relkind = 'r'
+ORDER BY age(relfrozenxid) DESC
+LIMIT 20;
+```
+
+<Callout type="gotcha" title="Disabling autovacuum does not remove the need for vacuum">
+  Disabling autovacuum saves I/O in the short run. In the long run, dead tuples
+  pile up, the table bloats, the visibility map stays dirty (killing index-only
+  scans), and unfrozen XIDs age toward the wraparound limit. At some point
+  Postgres fires a mandatory anti-wraparound vacuum pass anyway — aggressive,
+  unthrottled, and unavoidable. The correct fix for "autovacuum is causing I/O
+  spikes" is to tune it to run more often in smaller bites, not to disable it.
+</Callout>
+
+## The misconception
+
+> "VACUUM is just a janitor — it's optional on append-only tables."
+
+Wrong on both counts. VACUUM is not optional because:
+
+1. Even purely append-only tables accumulate unfrozen XIDs. Autovacuum fires
+   freeze passes on them regardless. You cannot opt out.
+2. Without vacuum, the visibility map stays dirty, and index-only scans on
+   even append-only tables degrade to heap-fetching.
+
+The "I have an append-only events table so I don't need vacuum" assumption is
+the single most common setup mistake in Postgres operations.
+
+## Where this goes next
+
+The storage model is complete: heap pages, MVCC tuple versions, dead-tuple
+cleanup via VACUUM. Everything that follows is built on this foundation. Part 4
+turns to the column level — which types Postgres actually gives you, and where
+your MySQL instincts need updating.

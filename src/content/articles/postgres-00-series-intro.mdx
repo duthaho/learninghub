@@ -1,0 +1,81 @@
+---
+title: "The Postgres series: start here"
+subtitle: "Eleven deep-dives for engineers who know their way around a database and want to understand what Postgres does differently — and why it matters in production."
+description: "A guide to the eleven-part Postgres deep-dive series: what each part covers, the mental model behind it, and the order to read them in."
+level: "Foundations · Series guide"
+accent: "#336791"
+readingTime: "4 min read"
+updated: 2026-09-07
+order: 50
+series: "Postgres"
+part: 0
+---
+
+If you know MySQL, you already know SQL. What you don't know is that Postgres's
+storage engine makes different tradeoffs at every layer — and those tradeoffs
+show up in subtle, production-shaped ways. A table that vacuums itself clean
+instead of relying on an undo log. An UPDATE that writes an entirely new row.
+A `SERIALIZABLE` transaction that aborts instead of blocking. DDL that
+participates in a `BEGIN`/`ROLLBACK`.
+
+This series is **written MySQL-aware.** Every part names where Postgres and
+InnoDB agree and where they diverge sharply. If you're coming from MySQL, you'll
+recognize the questions; the answers are often different in ways that change how
+you design schemas, tune autovacuum, and migrate live tables.
+
+If you're not a MySQL person, the series still works — the comparisons are
+labeled, and the Postgres model is explained from first principles each time.
+
+## The eleven parts
+
+1. **[The heap: how Postgres stores your rows](/postgres-01-storage-and-heap/)** — In Postgres, the table is *not* its primary-key index. Rows live in an unordered heap of 8KB pages. This changes how every index lookup works, what TID means, and what TOAST does with large values.
+
+2. **[MVCC: row versions in the heap](/postgres-02-mvcc/)** — Postgres keeps every version of a row as a full physical tuple in the heap — no undo log. Two hidden columns (`xmin`, `xmax`) carry the transaction-visibility story, and UPDATE is really insert + mark-deleted.
+
+3. **[VACUUM, autovacuum, and the dead-tuple problem](/postgres-03-vacuum/)** — Dead tuples pile up in the heap after every UPDATE and DELETE. VACUUM reclaims space for reuse, maintains the visibility map for index-only scans, and fights XID wraparound — the one failure mode that can halt all writes.
+
+4. **[Data types as design decisions](/postgres-04-data-types/)** — Several MySQL habits are ceremony in Postgres: `varchar(255)` buys nothing over `text`, `serial` has a better successor, and PG 18 ships `uuidv7()` in core. A few new tools — `timestamptz`, native arrays, enums — are worth reaching for.
+
+5. **[The index toolbox: beyond the B-tree](/postgres-05-index-types/)** — MySQL gives you one hammer. Postgres gives you GIN, GiST, BRIN, partial, expression, and INCLUDE indexes, plus the covering-index story is different here because index-only scans depend on the visibility map, not just the index.
+
+6. **[Reading EXPLAIN ANALYZE](/postgres-06-explain/)** — The plan is a tree (not a table like MySQL's). Execution flows bottom-up. Diagnosis always starts with one number: the node where estimated rows and actual rows diverge most.
+
+7. **[The planner and where estimates come from](/postgres-07-planner/)** — Every bad plan traces back to one wrong number in `pg_statistic`. Understanding MCV lists, histograms, the independence assumption, and `CREATE STATISTICS` is how you fix plans without adding hints.
+
+8. **[Transactions, isolation, and locking](/postgres-08-transactions/)** — Postgres defaults to `READ COMMITTED` (not Repeatable Read). Its `SERIALIZABLE` uses snapshot isolation and aborts the victim instead of blocking — but only if your code has a retry loop.
+
+9. **[JSONB and document modeling](/postgres-09-jsonb/)** — A real document type inside your relational database. The indexing rules are stricter than they look: GIN only helps the containment operators, and navigation-equality silently seq-scans unless you add an expression index.
+
+10. **[Transactional DDL and safe migrations](/postgres-10-migrations/)** — DDL participates in MVCC: wrap three `ALTER TABLE`s in a `BEGIN` and roll them all back. But transactional ≠ non-blocking, and those are separate concerns with separate solutions.
+
+11. **[WAL, replication, and production concerns](/postgres-11-wal-replication/)** — Every change is first written to WAL. Streaming replication copies it byte-for-byte; logical replication decodes it into row events. PgBouncer sits in front because Postgres is process-per-connection and that cost is real.
+
+## How to read it
+
+**Parts 1–3 are the storage foundation.** Everything else references them
+constantly. Part 1 establishes the heap and TID. Part 2 explains why there are
+dead tuples. Part 3 explains what VACUUM does about them and why it's mandatory.
+Don't skip this block; surprises in parts 4–11 almost always trace back here.
+
+**Parts 4–5 are design tools.** If you're greenfielding a schema, this is where
+the day-to-day decisions live: which type, which index.
+
+**Parts 6–7 are the performance diagnostic core.** You'll reach for these every
+time a query is slow: read the plan (part 6), then understand why the planner
+chose it (part 7).
+
+**Parts 8–9 are correctness under concurrency.** Isolation levels and locking
+(part 8) decide what concurrent transactions see and block. JSONB (part 9) is
+here because its update semantics interact with MVCC in ways that bite you at
+scale.
+
+**Parts 10–11 are operational realities.** Safe migrations on live tables (part
+10) and the replication/pooling/extensions layer (part 11) are what you need
+when the application is in production and can't stop.
+
+> Everything version-sensitive here was checked against **PostgreSQL 18**
+> (current as of September 2026; PG 19 is due shortly). The core concepts —
+> heap storage, MVCC, vacuum, the index types — are stable across PG 14+. New
+> native `uuidv7()` and some statistics improvements are PG 18 specifics and
+> are called out where they appear. Start with
+> [Part 1](/postgres-01-storage-and-heap/).

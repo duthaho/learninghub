@@ -1,0 +1,205 @@
+---
+title: "The heap: how Postgres stores your rows"
+subtitle: "In Postgres the table is not its primary-key index — and that one difference ripples through every lookup, every update, and the whole vacuuming story."
+description: "Why Postgres uses heap tables instead of a clustered index, how TID-based index lookups differ from InnoDB's bookmark lookup, and what TOAST does with large values."
+level: "Foundations · Beginner-friendly"
+accent: "#336791"
+readingTime: "11 min read"
+updated: 2026-09-07
+order: 51
+series: "Postgres"
+part: 1
+---
+
+import Callout from '../../components/Callout.astro';
+
+*Postgres deep-dive · Part 1 of 11. Next: [MVCC: row versions in the heap](/postgres-02-mvcc/).*
+
+Most MySQL tutorials describe the table as a spreadsheet and the index as a
+lookup book off to the side. In InnoDB that picture is wrong — the table *is*
+its primary-key index, physically sorted on disk. In Postgres, the original
+picture is closer to correct. The table is a **heap**: an unordered collection
+of 8KB pages. Rows land wherever there's free space. No index has any influence
+over where a row physically lives.
+
+Hold that difference in mind. It changes how every index lookup works, what the
+UUID-PK problem actually is, why VACUUM is necessary, and what happens when a
+column value won't fit on a page.
+
+We'll use the same schema throughout the series: a `users` table and an `orders`
+table in a backend API.
+
+```sql
+CREATE TABLE users (
+  id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  email      text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE orders (
+  id         uuid PRIMARY KEY DEFAULT uuidv7(),
+  user_id    bigint NOT NULL REFERENCES users(id),
+  total      numeric(10,2) NOT NULL,
+  status     text NOT NULL DEFAULT 'pending',
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+```
+
+## The heap: an unordered bag of 8KB pages
+
+Every Postgres table is stored as a sequence of **8KB pages** (also called
+blocks). Each page holds a header, a line pointer array pointing to the actual
+tuples, and the tuples themselves growing inward from the end. When you insert
+a row, Postgres finds a page with enough free space and places the tuple there.
+No ordering, no preference for where in the file it lands.
+
+Contrast this with InnoDB, where the clustered index *is* the table: leaves of
+the primary-key B-tree hold the full rows, physically sorted by PK. An
+`AUTO_INCREMENT` insert always goes to the rightmost leaf page. A random UUID
+insert lands wherever the key sorts, causing page splits.
+
+Postgres's heap doesn't work like that. The primary-key B-tree is a separate
+structure that lives alongside the heap. It's just another index. The heap has
+no concept of a "clustered" order — it's an unordered bag, and inserts go
+wherever there's room.
+
+<Callout type="insight" title="Every index is a first-class citizen">
+  In InnoDB, secondary indexes are second-class: they store the PK value and
+  pay a second B-tree descent to reach the row. In Postgres, *every* index is
+  structurally equal. The primary-key index is just another B-tree pointing at
+  the heap. There's no privileged index, no clustered structure — just the heap
+  and indexes that point into it.
+</Callout>
+
+## TID: the universal row pointer
+
+Every index entry in Postgres stores a **TID** (Tuple Identifier): a pair
+`(page_number, line_offset)` that points directly at a physical location in
+the heap. The PK index stores TIDs. The email unique index stores TIDs. A GIN
+index on a tags array stores TIDs. All of them point straight at the heap page.
+
+A lookup via any index follows the same path:
+
+1. Walk the B-tree to find the matching key.
+2. Read the TID from the index leaf.
+3. Fetch that heap page and find the tuple at the given offset.
+
+That's **one index descent + one heap fetch**, regardless of which index you
+use. Compare with InnoDB:
+
+- **Primary-key lookup:** one B-tree descent, row is right there (leaf holds
+  the full row).
+- **Secondary-index lookup:** one descent to the secondary index → PK value →
+  second descent into the clustered index → row.
+
+InnoDB's PK lookup is unbeatable — the data is right in the leaf. Postgres
+always needs the extra heap fetch. But InnoDB's secondary lookup pays *two*
+descents; Postgres pays one descent + one heap fetch. Different tradeoff, not
+strictly better or worse.
+
+```sql
+-- Every tuple has a hidden ctid column showing its current TID
+SELECT ctid, id, email FROM users LIMIT 5;
+--  ctid  | id |     email
+-- -------+----+------------------
+--  (0,1) |  1 | alice@example.com
+--  (0,2) |  2 | bob@example.com
+--  (1,1) |  3 | carol@example.com
+```
+
+The `(0,1)` means page 0, line offset 1. After an UPDATE, the ctid changes —
+the new version lives somewhere else in the heap. We'll come back to that in
+Part 2.
+
+## The UUID-PK penalty moves — it doesn't vanish
+
+A common MySQL lesson: random UUID primary keys cause page splits in the
+clustered index. The advice: use `UUIDv7` (time-ordered) instead.
+
+In Postgres, the heap doesn't care about PK ordering at all — the heap is
+already random. But the **PK B-tree** still cares. A random-UUID PK still
+causes page splits in that B-tree, still fragments the index, still hurts cache
+locality for PK range scans. The penalty moves from the table to the index. It
+doesn't vanish.
+
+So `UUIDv7` is still the right call — not because of heap ordering (there is
+none) but because a time-ordered PK keeps the index compact and avoids
+unnecessary splits. Postgres 18 ships `uuidv7()` in core, no extension needed.
+
+<Callout type="gotcha" title="'The heap is unordered so UUID doesn't matter' is half-right">
+  The heap has no ordering, so random keys don't fragment the *table* the way
+  they fragment InnoDB. But the PK index still has a sort order, and random
+  inserts still split its pages. UUIDv7 still wins over UUIDv4 for the same
+  reason it does in MySQL — monotonic keys keep the B-tree compact.
+</Callout>
+
+## CLUSTER: one-time physical ordering
+
+Postgres does have a `CLUSTER` command that rewrites the table in index order.
+But it's a one-time rewrite under `ACCESS EXCLUSIVE` lock, and the moment you
+start inserting and updating rows afterward, they land back in heap order. The
+clustering drifts away immediately. `CLUSTER` is useful for an analytics query
+pattern where you want a one-off bulk sort before a big read; it's not a
+substitute for InnoDB's persistent clustering.
+
+## TOAST: what happens to values that don't fit
+
+Every tuple must fit within one heap page (8KB). Most rows easily satisfy this,
+but the moment a single column value — a long text, a large JSON blob, a binary
+payload — grows beyond roughly 2KB, Postgres kicks in a two-stage mechanism
+called **TOAST** (The Oversized-Attribute Storage Technique).
+
+**Stage 1: compress in place.** Postgres first tries compressing the value with
+LZ4 (or pglz). If the compressed form fits on the page, it stays inline. Many
+JSON documents compress well, so they never leave the main page.
+
+**Stage 2: move out-of-line.** If the value is still too large after
+compression — the threshold is around 2KB — Postgres slices it into ~2KB chunks
+and stores those chunks in a hidden side table (`pg_toast.pg_toast_<oid>`),
+leaving an 18-byte pointer in the main row. From the query's point of view, the
+value is transparent: `SELECT payload FROM t` retrieves it correctly regardless
+of where it lives. But fetching it requires reading the TOAST table, which adds
+I/O.
+
+<Callout type="note" title="Two stages, not one">
+  A common misread of TOAST: "large values are compressed and moved to a side
+  table." The actual sequence is compress first, then move only if necessary.
+  A 3KB JSON document might compress to 800 bytes and stay inline, never
+  touching the TOAST table. The compress-then-maybe-move distinction matters
+  for understanding TOAST I/O patterns.
+</Callout>
+
+The practical implication: `SELECT *` on a table with large `text` or `jsonb`
+columns fetches TOAST chunks for every row, even if your application only needs
+`id` and `status`. Select only the columns you need on tables with large
+values.
+
+## Process-per-connection
+
+One more architectural fact that doesn't fit neatly anywhere else: each Postgres
+connection is a full **OS process**, not a thread. Each process gets its own
+memory, its own copy of the query state, its own ~5–10MB overhead. Two hundred
+idle connections consume a gigabyte of RAM before a single query runs.
+
+MySQL, by contrast, uses a thread-per-connection model. Threads are lighter.
+You can absorb hundreds of idle MySQL connections with minimal overhead.
+
+This difference is why PgBouncer — a connection pooler that multiplexes
+thousands of application connections onto a small pool of real Postgres backends
+— is effectively mandatory at any meaningful scale. We cover PgBouncer fully in
+Part 11. For now, just note that the process-per-connection model is a deliberate
+design choice that influences everything from autovacuum workers to parallel query
+processes.
+
+## Where this goes next
+
+The heap model sets up the next two parts. Because Postgres writes new row
+versions into the heap rather than updating in place, old versions accumulate as
+dead tuples — Part 2 explains how that works. Part 3 explains how VACUUM cleans
+them up, and why you can't opt out.
+
+> If you can explain why a Postgres secondary-index lookup costs one B-tree
+> descent plus one heap fetch (rather than two B-tree descents like an InnoDB
+> secondary lookup), and why the UUID-PK page-split problem moves to the index
+> rather than disappearing — you've understood what makes the heap model
+> different.

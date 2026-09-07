@@ -1,0 +1,299 @@
+---
+title: "The index toolbox: beyond the B-tree"
+subtitle: "Postgres gives you six index types and three index forms. The combination you choose decides whether a query becomes fast or stays slow."
+description: "GIN, GiST, BRIN, partial, expression, and INCLUDE indexes explained: when each fits, what each costs, and how index-only scans depend on the visibility map."
+level: "Core"
+accent: "#336791"
+readingTime: "15 min read"
+updated: 2026-09-07
+order: 55
+series: "Postgres"
+part: 5
+---
+
+import Callout from '../../components/Callout.astro';
+
+*Postgres deep-dive · Part 5 of 11. Prev: [Data types as design decisions](/postgres-04-data-types/). Next: [Reading EXPLAIN ANALYZE](/postgres-06-explain/).*
+
+MySQL gives you one index structure: the B-tree. You design it well or poorly
+by choosing columns and column order, but the underlying algorithm is always the
+same sorted B-tree.
+
+Postgres gives you **six index types** and **three index forms** that compose
+independently. The type is the data structure; the form is how you restrict or
+extend it. Pick the wrong type and the index exists but helps nothing. Pick the
+right combination and you can make substring search, document containment, and
+massive time-series range scans fast without leaving your transactional database.
+
+## B-tree: the default and the workhorse
+
+`CREATE INDEX ON t (col)` creates a B-tree. It handles equality (`=`), ranges
+(`<`, `>`, `BETWEEN`), prefix patterns (`LIKE 'prefix%'`), and serves `ORDER
+BY`. Your entire InnoDB index knowledge — composite column order, leftmost
+prefix, equality-before-range — transfers verbatim. This is the right choice
+~90% of the time.
+
+```sql
+-- Composite: equality columns first, then range/order column
+CREATE INDEX idx_orders_user_status_created
+  ON orders (user_id, status, created_at DESC);
+```
+
+## GIN: the contains index
+
+**GIN** (Generalized Inverted Index) is the index for "does this column contain
+X?" questions. It explodes a composite value into elements and builds an
+inverted mapping: element → set of TIDs that contain it.
+
+A row with `tags = ARRAY['urgent','billing','eu']` produces three GIN index
+entries — one per element. A `WHERE tags @> ARRAY['billing']` lookup reads the
+`'billing'` posting list and finds the matching rows instantly.
+
+GIN works on:
+- **Arrays** with `@>` containment and `?` overlap operators
+- **`jsonb`** with `@>` containment and `?` existence
+- **`tsvector`** for full-text search
+- **`text`** for substring and fuzzy search via `pg_trgm`
+
+```sql
+-- Array containment
+CREATE INDEX idx_articles_tags ON articles USING gin(tags);
+SELECT title FROM articles WHERE tags @> ARRAY['postgres','mvcc'];
+
+-- Full-text search
+ALTER TABLE articles ADD COLUMN tsv tsvector
+  GENERATED ALWAYS AS (to_tsvector('english', title || ' ' || coalesce(body,''))) STORED;
+CREATE INDEX idx_articles_fts ON articles USING gin(tsv);
+SELECT title FROM articles WHERE tsv @@ to_tsquery('english', 'postgres & mvcc');
+```
+
+### Substring and fuzzy search with pg_trgm
+
+GIN accelerates `ILIKE '%substring%'` queries — but only with the `pg_trgm`
+extension and the `gin_trgm_ops` opclass. A plain GIN index on a `text` column
+does nothing for substring search.
+
+`pg_trgm` decomposes a string into overlapping 3-character windows (trigrams)
+with padding. `'hello'` → `'  h'`, `' he'`, `'hel'`, `'ell'`, `'llo'`, `'lo '`,
+`'o  '`. The GIN index maps each trigram to the rows containing it. A query
+`WHERE name ILIKE '%invoice%'` decomposes `'invoice'` into its trigrams and
+intersects the posting lists.
+
+```sql
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
+CREATE INDEX idx_contacts_name_trgm
+  ON contacts USING gin (name gin_trgm_ops);
+
+-- Now this uses the GIN index (would be a seq scan without it):
+SELECT id, name FROM contacts WHERE name ILIKE '%invoice%';
+SELECT id, name FROM contacts WHERE name % 'invioce';  -- fuzzy match
+```
+
+<Callout type="gotcha" title="Plain GIN on text doesn't index substrings">
+  `CREATE INDEX ON contacts USING gin(name)` without an opclass creates a GIN
+  index, but it indexes nothing useful for text — GIN on bare `text` has no
+  built-in element decomposition. The index exists, the planner ignores it for
+  `ILIKE` queries, and you get a seq scan. The opclass `gin_trgm_ops` is what
+  decomposes the string. The DDL requires both: `USING gin (name gin_trgm_ops)`.
+</Callout>
+
+GIN's tradeoff: fast reads, expensive writes. Each write decomposes the value
+and updates potentially many posting lists. On a column with very high write
+throughput, a GIN index is a significant write-tax. Consider `gin_pending_list_limit`
+to batch small updates.
+
+## GiST: the overlap and distance index
+
+**GiST** (Generalized Search Tree) is a framework for indexing "overlap" and
+"nearest-neighbor" shaped questions. You'll reach for it with:
+
+- Geometric types (`point`, `box`, `polygon`) — containment and distance
+- Range types (`tstzrange`, `daterange`) — overlap, containment, exclusion
+- Geographic data with PostGIS
+- `tsvector` — GiST supports nearest-neighbor `<->` ordering
+
+The canonical GiST use case in a booking system is the exclusion constraint:
+no two reservations for the same resource can overlap.
+
+```sql
+CREATE TABLE reservations (
+  id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  resource_id bigint NOT NULL,
+  during      tstzrange NOT NULL,
+
+  EXCLUDE USING gist (resource_id WITH =, during WITH &&)
+);
+-- This constraint is enforced by a GiST index — it's not just a check.
+-- Inserting an overlapping reservation raises a unique-violation-style error.
+```
+
+GIN vs GiST for full-text search: GIN is faster to query (direct posting list
+lookup), GiST is faster to update and supports ranked ordering with `<->`. For
+static or slow-changing text, GIN. For frequently updated text where `ts_rank`
+ordering is needed, GiST.
+
+## BRIN: the block range index for physically ordered data
+
+**BRIN** (Block Range INdex) is tiny and fast for the right data pattern.
+Instead of an entry per row (like B-tree or GIN), BRIN stores the min/max values
+for a range of pages (default: 128 pages = 1MB). A query `WHERE created_at
+BETWEEN x AND y` checks each block range: if `[min,max]` can't overlap `[x,y]`,
+skip all 128 pages. A BRIN on a 2-billion-row events table might be a few
+megabytes; a B-tree would be tens of gigabytes.
+
+```sql
+CREATE INDEX idx_events_created_brin
+  ON events USING brin(created_at)
+  WITH (pages_per_range = 64);
+```
+
+**The critical condition**: BRIN only works when insertion order correlates with
+column order. A time-series table where rows are inserted in timestamp order is
+ideal — all Jan rows are physically near each other, the block ranges are tight.
+A table with random back-dated inserts or frequent UPDATEs to the indexed column
+has block ranges that span the full data range, and BRIN becomes useless (every
+block range overlaps every query range).
+
+<Callout type="insight" title="BRIN is not 'B-tree but smaller'">
+  BRIN and B-tree are for completely different shapes of problem. B-tree handles
+  arbitrary access patterns on any column. BRIN handles range queries on
+  *physically ordered* data — append-only log tables, partitioned time-series,
+  sensor streams. On append-only `created_at`, BRIN is dramatically better. On
+  a general-purpose `price` column with random inserts, BRIN is useless.
+</Callout>
+
+## Index forms: partial, expression, and INCLUDE
+
+These aren't separate index types — they're modifiers you apply to any type.
+
+### Partial indexes
+
+A partial index indexes only the rows that satisfy a `WHERE` clause:
+
+```sql
+-- Only pending orders — typically 0.5% of the table
+CREATE INDEX idx_orders_pending_created
+  ON orders (created_at)
+  WHERE status = 'pending';
+
+-- Soft-delete pattern: index only non-deleted rows
+CREATE INDEX idx_users_active_email
+  ON users (email)
+  WHERE deleted_at IS NULL;
+```
+
+Partial indexes can be 100–1000× smaller than a full index on a filtered column.
+They produce zero index writes for rows that don't match the predicate — on a
+`status = 'pending'` partial index, updates to `status = 'shipped'` rows don't
+touch the index, staying HOT-eligible if no other indexed column changed.
+
+MySQL has no equivalent. This is one of the cleanest wins in Postgres indexing.
+
+### Expression indexes
+
+Index the result of a function or expression rather than a raw column:
+
+```sql
+-- Case-insensitive unique email
+CREATE UNIQUE INDEX idx_users_email_lower
+  ON users (lower(email));
+
+-- Query must use the same expression to hit the index:
+SELECT id FROM users WHERE lower(email) = lower('Alice@Example.com');
+```
+
+Expression indexes add the expression's input columns to the indexed set, which
+affects HOT eligibility — an update to `email` (even if `lower(email)` doesn't
+change) disqualifies HOT for that row.
+
+### INCLUDE: covering without widening the key
+
+`INCLUDE` adds "payload" columns to index leaf pages without making them part
+of the sort key:
+
+```sql
+CREATE INDEX idx_orders_user_covering
+  ON orders (user_id)
+  INCLUDE (created_at, total, status);
+```
+
+A query `SELECT created_at, total, status FROM orders WHERE user_id = 42` can
+now be answered from the index alone — no heap fetch needed (subject to the
+visibility map, next section).
+
+The `INCLUDE` columns don't affect sort order or lookup matching, so `WHERE
+total > 100` still isn't served by this index (the B-tree isn't sorted by
+`total`). They're payload for covering, not keys for seeking.
+
+## Index-only scans and the visibility map
+
+In MySQL, a covering index always covers — no heap visit needed. In Postgres
+it's more nuanced.
+
+Index entries don't carry `xmin`/`xmax` visibility information — those fields
+live in heap tuple headers. Normally, an index-only scan would need a heap
+fetch per row to verify visibility. The optimization: if the **visibility map**
+marks a heap page as all-visible (Part 3), every tuple on it is visible to
+everyone, so the executor can skip the heap fetch.
+
+```sql
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT user_id, created_at FROM orders WHERE user_id = 42;
+
+-- Best case (VM clean):
+-- Index Only Scan on idx_orders_user_covering
+--   Heap Fetches: 0
+
+-- After heavy writes, before vacuum:
+-- Index Only Scan on idx_orders_user_covering
+--   Heap Fetches: 847  ← VM dirty pages, falling back to heap
+```
+
+`Heap Fetches > 0` is the diagnostic. It means vacuum is behind, the VM has
+dirty pages, and your covering index is silently fetching heap pages. Fix: tune
+autovacuum on the table (Part 3) or run `VACUUM ANALYZE` manually.
+
+<Callout type="insight" title="Partial + composite is the work-queue pattern">
+  `WHERE state = 'open'` plus `ORDER BY created_at LIMIT 1` is the classic
+  queue pull. The optimal index: `CREATE INDEX ON jobs (created_at) WHERE state
+  = 'open'`. The partial clause prunes 99.7% of the table before the B-tree
+  scan even starts. The composite alternative `(state, created_at)` works too,
+  but the partial is dramatically smaller and the planner often prefers it when
+  the fraction of open jobs is small.
+</Callout>
+
+## Putting it together: three workloads
+
+| Workload | Right choice | Why |
+|---|---|---|
+| `WHERE tags @> ARRAY['urgent']` | GIN on `tags` | Array containment, needs inverted index |
+| `WHERE name ILIKE '%invoice%'` | GIN with `gin_trgm_ops` | Substring — trigram decomposition |
+| `WHERE created_at > now() - '7d'::interval` on 2B-row append-only events | BRIN | Physically ordered, massive range, tiny index |
+| `WHERE status = 'pending' ORDER BY created_at LIMIT 1` | Partial B-tree `WHERE status='pending'` | 99% of rows pruned before the scan |
+| `SELECT id, total FROM orders WHERE user_id = ?` | B-tree with `INCLUDE (total)` | Covering scan without heap fetches |
+| `WHERE attrs @> '{"brand":"Acme"}'` | GIN on `attrs` | JSONB containment |
+| `WHERE attrs->>'brand' = 'Acme'` | Expression B-tree on `((attrs->>'brand'))` | Navigation-equality — GIN doesn't help here |
+
+## The misconception
+
+> "We need Elasticsearch for substring search and document queries."
+
+Sometimes true at very large scale, with relevance ranking requirements. But
+the reflex skips the middle option:
+
+- Substring/fuzzy search → `pg_trgm` GIN handles it at application scale
+- Full-text with ranking → `tsvector` GIN with `ts_rank`
+- JSONB document queries → GIN with `@>` containment
+- Massive time-series range scans → BRIN
+
+All inside your existing transactional database, with joins, foreign keys, and
+ACID semantics. Add the external search engine when you need its specific
+features, not as the first move.
+
+## Where this goes next
+
+You now have a toolbox of index types and forms. Part 6 is about reading the
+plan that the Postgres planner actually chose — confirming that the index is
+being used, that the row estimate is sane, and diagnosing the five failure modes
+that explain why a query is still slow even with the right index.

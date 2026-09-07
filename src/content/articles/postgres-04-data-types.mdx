@@ -1,0 +1,257 @@
+---
+title: "Data types as design decisions"
+subtitle: "Several MySQL habits are ceremony in Postgres — and a few native types are first-class tools worth reaching for."
+description: "Postgres data types for backend engineers: why text beats varchar(n), when to use timestamptz, identity over serial, uuidv7() in PG 18, and native arrays and enums."
+level: "Foundations"
+accent: "#336791"
+readingTime: "12 min read"
+updated: 2026-09-07
+order: 54
+series: "Postgres"
+part: 4
+---
+
+import Callout from '../../components/Callout.astro';
+
+*Postgres deep-dive · Part 4 of 11. Prev: [VACUUM, autovacuum, and the dead-tuple problem](/postgres-03-vacuum/). Next: [The index toolbox: beyond the B-tree](/postgres-05-index-types/).*
+
+Your MySQL type instincts mostly transfer. Where they don't, it's usually because
+Postgres made a different tradeoff between flexibility and ceremony, or because
+it offers a native type that MySQL handles with extensions or application code.
+
+This part walks the categories that matter: strings, numbers, timestamps,
+primary keys, and a few types MySQL doesn't have at all.
+
+## Strings: text over varchar(n)
+
+In Postgres, `text`, `varchar(n)`, and `varchar` are **the same underlying
+type** — all stored as `varlena` (variable-length arrays) with the same
+performance characteristics, the same TOAST escalation, the same everything.
+`varchar(n)` is just `text` with an inline `CHECK (char_length(value) <= n)`
+automatically applied. `char(n)` pads with blanks and has no performance
+advantage; avoid it.
+
+The idiomatic Postgres choice is `text`. If your domain has a real maximum
+length, express it as a `CHECK` constraint:
+
+```sql
+CREATE TABLE users (
+  id       bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  username text NOT NULL,
+  bio      text,
+
+  CONSTRAINT chk_username_len CHECK (char_length(username) <= 50),
+  CONSTRAINT chk_bio_len      CHECK (char_length(bio) <= 500)
+);
+```
+
+This is strictly better than `varchar(50)` for two reasons. First, the
+constraint documents intent just as clearly. Second, you can `ALTER TABLE DROP
+CONSTRAINT chk_username_len` to relax the limit at any time — an instant
+metadata operation. Increasing `varchar(50)` to `varchar(100)` in MySQL
+requires a full table scan or an `ALGORITHM=INPLACE` DDL. In Postgres it also
+requires a table scan (the stored type doesn't change, but the check must be
+validated). `DROP CONSTRAINT` is instant; `ALTER COLUMN TYPE` is not.
+
+<Callout type="gotcha" title="varchar(255) is not smaller or faster than text">
+  In Postgres, `varchar(255)` and `text` take the same storage for the same
+  string, use the same TOAST escalation, and have identical scan performance.
+  The `255` buys you one extra write-path check and a documentation hint that
+  may be wrong the day someone needs 256 characters. Use `text` with a `CHECK`
+  constraint if you want the boundary, and drop the constraint when you don't.
+</Callout>
+
+## Numbers: numeric, bigint, and money
+
+**`numeric(p,s)`** (standard SQL `DECIMAL`) is exact arbitrary-precision
+arithmetic stored in software. It's correct for money and anything where a
+rounding error would be a bug. Postgres's `money` type exists but is
+locale-dependent for formatting and awkward to do arithmetic with. Use
+`numeric(10,2)` for monetary columns.
+
+**`bigint`** (8 bytes) is the workhorse for IDs and counts. Postgres has no
+`UNSIGNED` modifier — the positive range of `bigint` (up to about 9.2 quintillion)
+is sufficient for any practical primary key. For hot arithmetic paths — summing
+prices, counting rows — an integer or bigint beat `numeric` because they use
+native CPU instructions. Store prices as `bigint` cents and divide at the
+display layer if you need that speed.
+
+**`float8` / `double precision`** is for scientific/measurement data where
+approximate arithmetic is acceptable. Not for money.
+
+## Timestamps: always timestamptz
+
+`timestamptz` (timestamp with time zone) is almost always the right choice for
+any instant in time. Despite the name, it does **not** store a time zone label.
+It stores 8 bytes of UTC microseconds. The "tz" means Postgres converts on the
+way in — accepting input with any timezone offset or IANA zone — and converts
+on the way out to the session's `TimeZone` setting.
+
+```sql
+-- timestamptz stores UTC; session TimeZone controls display
+SET TimeZone = 'UTC';
+SELECT '2026-09-07 10:00:00+05:30'::timestamptz;
+-- 2026-09-07 04:30:00+00  ← stored and displayed as UTC
+
+SET TimeZone = 'America/New_York';
+SELECT '2026-09-07 10:00:00+05:30'::timestamptz;
+-- 2026-09-07 00:30:00-04  ← same instant, different display
+```
+
+`timestamp` (without tz) stores a naive wall-clock reading with no timezone
+semantics. It's right for "store-hours open at 9:00 AM" where the value *is*
+a local time, not an instant. For `created_at`, `updated_at`, event timestamps
+— use `timestamptz`.
+
+<Callout type="gotcha" title="Session TimeZone affects input interpretation, not just display">
+  A timestamp literal *without* an explicit offset (`'2026-09-07 10:00:00'`)
+  is interpreted as being in the current session's timezone before converting
+  to UTC for storage. If your application server runs in one timezone and your
+  database session runs in another, the same literal produces different stored
+  values. Always include an explicit offset in application-generated timestamps,
+  or use `now()` / `CURRENT_TIMESTAMP` (which returns the current UTC time
+  regardless of session timezone).
+</Callout>
+
+The range is years 4713 BC to 294276 AD — no 2038 problem.
+
+## Primary keys: identity over serial, uuidv7 over uuidv4
+
+**`GENERATED ALWAYS AS IDENTITY`** is the modern integer sequence. It's SQL
+standard, the sequence is owned by the column, and `ALWAYS` prevents accidental
+manual inserts that skip the sequence:
+
+```sql
+CREATE TABLE items (
+  id   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name text NOT NULL
+);
+```
+
+`serial` is the legacy equivalent — it creates a loose sequence and sets a
+column default. The sequence isn't tied to the column and can be dropped
+independently, leaving the table in a broken state. All new tables should use
+`IDENTITY`.
+
+**UUID**: Postgres stores UUIDs natively as 16-byte binary (`uuid` type). No
+`BINARY(16)` dance, no `UUID_TO_BIN()` helpers — just `uuid`. Postgres 18 ships
+`uuidv7()` in core:
+
+```sql
+CREATE TABLE orders (
+  id         uuid PRIMARY KEY DEFAULT uuidv7(),
+  user_id    bigint NOT NULL,
+  total      numeric(10,2) NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- uuidv7 encodes creation time — you can extract it:
+SELECT uuid_extract_timestamp('0193d6e1-1234-7abc-8def-000000000001');
+-- 2026-09-07 04:30:00.123+00
+```
+
+UUIDv7 is time-ordered (millisecond timestamp in the leading bits), so new
+values sort after existing ones — the PK B-tree gets the same sequential-insert
+benefit as `AUTO_INCREMENT`, without leaking a guessable counter. For
+distributed systems where you need to generate IDs in application code without
+a round-trip to the database, `uuidv7()` on the client side (or `gen_random_uuid()`
+for v4 when ordering doesn't matter) both work with Postgres's native `uuid` type.
+
+As Part 1 explained, the UUID-PK page-split problem in Postgres is an index
+problem, not a table problem — but it's still a problem. UUIDv7 fixes it.
+
+## Arrays: native, indexable, first-class
+
+Postgres supports array columns for any type. `text[]`, `int[]`, `uuid[]` — all
+stored natively:
+
+```sql
+CREATE TABLE articles (
+  id   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  title text NOT NULL,
+  tags  text[]
+);
+
+INSERT INTO articles (title, tags)
+VALUES ('Postgres MVCC', ARRAY['postgres', 'internals', 'mvcc']);
+
+-- Array containment query — indexable with GIN (Part 5)
+SELECT title FROM articles WHERE tags @> ARRAY['postgres'];
+```
+
+Arrays are not the relational anti-pattern they are in other contexts. Postgres
+arrays are a real type with real operators and real indexes. They're the right
+choice for small, ordered value-lists owned by the row that don't need foreign
+keys or their own metadata. When the list items need references, constraints,
+or metadata of their own — use a join table.
+
+## Enums: schema-level types with caveats
+
+```sql
+CREATE TYPE order_status AS ENUM ('pending', 'processing', 'shipped', 'cancelled');
+
+CREATE TABLE orders (
+  id     uuid PRIMARY KEY DEFAULT uuidv7(),
+  status order_status NOT NULL DEFAULT 'pending'
+);
+```
+
+Enums are schema-level types (reusable across tables), stored as 4 bytes, and
+sort in declaration order. Adding a value is cheap:
+
+```sql
+ALTER TYPE order_status ADD VALUE 'returned' AFTER 'shipped';
+```
+
+Renaming or removing a value, or reordering the list, is painful — it requires
+creating a new type and migrating the column. For a state machine where the
+values are stable, enums are clean. For fast-evolving statuses, `text` plus a
+`CHECK` constraint or a lookup table stays more flexible.
+
+## The schema exercise
+
+Here's the schema from our learning session, with all the type decisions applied:
+
+```sql
+CREATE TYPE payment_status AS ENUM ('pending', 'captured', 'refunded', 'failed');
+
+CREATE TABLE payments (
+  id              uuid PRIMARY KEY DEFAULT uuidv7(),
+  order_id        uuid NOT NULL REFERENCES orders(id),
+  amount          numeric(8,2) NOT NULL,
+  currency        char(3) NOT NULL DEFAULT 'USD',
+  status          payment_status NOT NULL DEFAULT 'pending',
+  customer_note   text CHECK (char_length(customer_note) <= 500),
+  metadata        jsonb,
+  tags            text[],
+  created_at      timestamptz NOT NULL DEFAULT now(),
+  captured_at     timestamptz
+);
+```
+
+Type decisions spelled out:
+- `uuid DEFAULT uuidv7()` — globally unique, time-ordered, no round-trip
+- `numeric(8,2)` — exact for money, with explicit precision
+- `char(3)` — the one case for fixed-length: ISO 4217 currency codes are always 3
+- `payment_status` enum — small stable value set with sort semantics
+- `text` with a `CHECK` for the note — relaxable limit, same storage as `varchar`
+- `jsonb` for metadata — variable schema, queryable, GIN-indexable
+- `text[]` for tags — small list, GIN-indexable with `@>` (Part 5)
+- `timestamptz` for all timestamps — instants in time, always
+
+## The misconception
+
+> "I'll use `varchar(n)` for discipline and performance."
+
+No performance gain. The only difference between `varchar(50)` and `text` with
+`CHECK (char_length(col) <= 50)` is that the `CHECK` constraint can be dropped
+in a metadata-only operation, and `varchar(50)` cannot be widened without a
+table-level DDL. The discipline is real in either case. Route it through `CHECK`
+and preserve your future flexibility.
+
+## Where this goes next
+
+Types decide what your columns hold. Part 5 decides how to query them
+efficiently — which index type to reach for when B-tree isn't the answer, and
+the two orthogonal dimensions of index design (type and form) that give Postgres
+its edge.

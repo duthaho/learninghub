@@ -1,0 +1,263 @@
+---
+title: "Transactions, isolation, and locking"
+subtitle: "Postgres defaults to READ COMMITTED (not Repeatable Read), its SERIALIZABLE aborts instead of blocking, and FOR UPDATE SKIP LOCKED is a work queue in one clause."
+description: "Postgres isolation levels, snapshot isolation, SSI serializable, row-lock flavors (FOR UPDATE, SKIP LOCKED, NOWAIT), advisory locks, and how it all differs from MySQL's gap-lock approach."
+level: "Advanced"
+accent: "#336791"
+readingTime: "15 min read"
+updated: 2026-09-07
+order: 58
+series: "Postgres"
+part: 8
+---
+
+import Callout from '../../components/Callout.astro';
+
+*Postgres deep-dive · Part 8 of 11. Prev: [The planner and where estimates come from](/postgres-07-planner/). Next: [JSONB and document modeling](/postgres-09-jsonb/).*
+
+Same SQL isolation names, different defaults, and one mechanism that's
+completely different from MySQL. If you build a system assuming MySQL semantics
+and deploy on Postgres without adjusting, you'll get the wrong anomaly
+prevention — or, worse, a system that silently tolerates concurrent writes it
+shouldn't.
+
+The three divergence points: default isolation level, how SERIALIZABLE is
+implemented, and the row-lock variants that make work queues and advisory locks
+first-class tools.
+
+## Default isolation: READ COMMITTED, not REPEATABLE READ
+
+MySQL's default is `REPEATABLE READ`: every statement in a transaction reads
+from the snapshot taken at the start of the transaction. A second `SELECT` in
+the same transaction sees the same data even if another transaction committed
+between the two reads.
+
+Postgres's default is **`READ COMMITTED`**: each *statement* gets a fresh
+snapshot. A second `SELECT` in the same transaction sees any rows committed
+between the first and second `SELECT`.
+
+```sql
+-- Session A:
+BEGIN;
+SELECT total FROM orders WHERE id = 42;
+-- returns: 100.00
+
+-- Session B (commits between A's two SELECTs):
+UPDATE orders SET total = 150.00 WHERE id = 42;
+COMMIT;
+
+-- Session A (still in its transaction):
+SELECT total FROM orders WHERE id = 42;
+-- READ COMMITTED: returns 150.00 (sees Session B's commit)
+-- REPEATABLE READ: returns 100.00 (snapshot from BEGIN)
+```
+
+If your query results must be consistent with each other within a transaction
+— a financial report, a multi-step calculation — you need `REPEATABLE READ`:
+
+```sql
+BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+-- All SELECTs now use the snapshot from this BEGIN
+```
+
+`READ UNCOMMITTED` is accepted for compatibility but treated identically to
+`READ COMMITTED` — MVCC-based engines can't do dirty reads by construction.
+
+## Postgres REPEATABLE READ: stronger than the SQL standard
+
+Postgres's `REPEATABLE READ` uses full **snapshot isolation**: one snapshot for
+the whole transaction, no phantom rows even for predicate queries. The SQL
+standard only requires that phantom rows be prevented at `SERIALIZABLE`, not
+`REPEATABLE READ`. Postgres gives you phantom prevention at `RR` for free.
+
+InnoDB achieves RR + phantom prevention through **gap locks**: range-based row
+locks that prevent inserts in between existing rows. Gap locks cause a whole
+class of deadlocks (gap-lock deadlocks) that you'd diagnose in MySQL production
+and never encounter in Postgres.
+
+Postgres RR has no gap locks. Phantom prevention is a consequence of the
+snapshot — if a row didn't exist when the snapshot was taken, no transaction
+running under that snapshot will see it, regardless of when it was inserted.
+
+<Callout type="insight" title="An entire class of MySQL deadlocks doesn't exist in Postgres">
+  Gap-lock deadlocks — two transactions each gap-locking ranges that overlap —
+  are a real MySQL operational concern. Postgres has no gap locks. The phantom
+  prevention mechanism is different (snapshot-based, not lock-based), and the
+  deadlock category simply doesn't apply. You still get row-level deadlocks in
+  Postgres (two transactions locking the same rows in opposite order), but
+  the gap-lock category is absent.
+</Callout>
+
+## SERIALIZABLE: SSI — abort instead of block
+
+Postgres's `SERIALIZABLE` uses **Serializable Snapshot Isolation (SSI)**, not
+traditional locking or even gap locks. It runs transactions optimistically —
+no extra blocking — and monitors read/write dependency cycles. When it detects
+a cycle that indicates two transactions whose combined effect is non-serializable,
+it aborts one of them with:
+
+```
+ERROR:  could not serialize access due to read/write dependencies
+SQLSTATE: 40001
+```
+
+This means `SERIALIZABLE` in Postgres produces no blocking beyond what `RR`
+produces. The cost is that serialization failures are real: your application
+code **must** catch `40001` and retry.
+
+### Write skew: the anomaly SSI prevents
+
+Snapshot isolation has one well-known weakness: **write skew**. Two transactions
+read overlapping data, each sees an invariant satisfied, each writes based on
+what it read — but the combination violates the invariant.
+
+The canonical example: hospital on-call policy requires at least one doctor on
+call at all times. Two doctors both read "2 on call" and each decides to remove
+themselves. Both commit. 0 doctors on call. Each transaction was individually
+correct; the combination wasn't.
+
+SSI detects this pattern and aborts one transaction. The other commits. The
+retry picks up the updated state and correctly refuses to remove the last doctor.
+
+```sql
+-- Application retry pattern (pseudocode)
+MAX_RETRIES = 5
+for attempt in range(MAX_RETRIES):
+    try:
+        with db.transaction(isolation='serializable'):
+            # Your business logic here
+            break  # success
+    except SerializationFailure:  # 40001
+        if attempt == MAX_RETRIES - 1:
+            raise
+        backoff(attempt)
+```
+
+<Callout type="gotcha" title="SERIALIZABLE without a retry loop makes things worse">
+  Setting your default isolation to SERIALIZABLE for safety, without adding
+  retry logic, turns every serialization failure into an error surfaced to the
+  user. Under contention, more transactions fail. The system becomes *less*
+  reliable under load, not more. SERIALIZABLE is a correctness tool that
+  requires application-level retry to be safe.
+</Callout>
+
+## Row lock variants
+
+### FOR UPDATE
+
+`SELECT ... FOR UPDATE` locks the returned rows so that other transactions
+attempting to lock or modify them must wait:
+
+```sql
+BEGIN;
+SELECT id, total FROM orders WHERE id = 42 FOR UPDATE;
+-- Other transactions attempting UPDATE or SELECT ... FOR UPDATE on id=42 block here
+UPDATE orders SET total = total + 10 WHERE id = 42;
+COMMIT;
+```
+
+This is the read-then-write pattern in explicit locking: read the current state,
+lock it, modify it within the same transaction.
+
+Postgres also has `FOR NO KEY UPDATE` (weaker — allows FK referencing
+transactions to proceed), `FOR SHARE` (shared read lock), and `FOR KEY SHARE`
+(weaker shared lock for FK checks).
+
+### FOR UPDATE SKIP LOCKED: the work-queue primitive
+
+`SKIP LOCKED` is `FOR UPDATE` with a twist: instead of blocking on a row that's
+already locked, skip it and return the next unlocked row. This is a ready-made
+concurrent work queue:
+
+```sql
+-- N workers run this concurrently, never colliding:
+BEGIN;
+SELECT id, payload
+FROM jobs
+WHERE state = 'unclaimed'
+ORDER BY created_at
+LIMIT 1
+FOR UPDATE SKIP LOCKED;
+
+-- Process the job, then:
+UPDATE jobs SET state = 'done' WHERE id = $1;
+COMMIT;
+```
+
+Multiple workers each grab one unlocked job without collision, without waiting,
+and without a separate advisory lock. The claim and processing happen in one
+transaction — if the worker crashes, the transaction rolls back and the job is
+unclaimed again.
+
+`NOWAIT` is the other variant: fail immediately with an error instead of waiting
+or skipping. Use when you need to know that a row is contested rather than
+silently moving past it.
+
+## Advisory locks
+
+Advisory locks are application-defined mutexes stored in the Postgres process
+but not tied to any table row or transaction:
+
+```sql
+-- Cluster-wide mutex: only one instance runs at a time
+SELECT pg_advisory_lock(12345);   -- blocks if already held
+-- ... critical section ...
+SELECT pg_advisory_unlock(12345);
+
+-- Non-blocking version:
+SELECT pg_try_advisory_lock(12345);  -- returns true if acquired, false if not
+```
+
+Session-scoped advisory locks persist until explicitly released or the session
+ends. Transaction-scoped versions (`pg_advisory_xact_lock`) release at
+transaction end.
+
+Use cases: singleton cron workers (only one cluster node runs the nightly job),
+rate-limiting a resource by ID, coordinating application-level sharding
+decisions. These are cheap (no table scan, no page lock) and cluster-wide.
+
+## Deadlocks
+
+Deadlocks still happen — two transactions locking rows A and B in opposite
+order, each waiting for what the other holds. Postgres runs a deadlock detector
+(approximately every second by default) and aborts one victim with `SQLSTATE
+40P01`. The victim transaction gets an error; the other proceeds.
+
+```
+ERROR:  deadlock detected
+DETAIL:  Process 1234 waits for ShareLock on transaction 5678;
+         blocked by process 5678.
+         Process 5678 waits for ShareLock on transaction 1234;
+         blocked by process 1234.
+HINT:    See server log for query details.
+SQLSTATE: 40P01
+```
+
+The application must catch `40P01` and retry. The same lock-ordering discipline
+applies as in MySQL: establish a consistent order for acquiring locks across
+concurrent transactions to prevent cycles. When two paths always lock in the
+same order, cycles can't form.
+
+## The misconception
+
+> "I'll set SERIALIZABLE for all transactions and my concurrency bugs are solved."
+
+Two traps:
+
+1. Without a retry loop, serialization failures (`40001`) surface as errors.
+   Under contention, more transactions fail. The system becomes less reliable.
+
+2. SERIALIZABLE prevents serializability violations, but doesn't protect
+   against lost updates from outside-transaction read-modify-write patterns.
+   If your application reads a row in one HTTP request, computes a new value,
+   and writes it in a second request (two separate transactions), SERIALIZABLE
+   is scoped to each transaction and doesn't connect them. For that pattern, use
+   `FOR UPDATE` within a single transaction, or optimistic locking with a
+   `version` column.
+
+## Where this goes next
+
+Correctness in concurrent access is the subject of Part 8. Part 9 shifts to
+JSONB: how Postgres's document type intersects with the heap, MVCC, and the
+index model — and the operator-family confusion that causes silent seq scans on
+otherwise well-designed schemas.

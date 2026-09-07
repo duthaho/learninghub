@@ -1,0 +1,214 @@
+---
+title: "MVCC: row versions in the heap"
+subtitle: "Postgres keeps old row versions inside the table itself — the opposite of InnoDB — and that one choice explains dead tuples, instant rollbacks, and why UPDATE is expensive."
+description: "How Postgres MVCC works: xmin/xmax hidden columns, why UPDATE writes a new tuple instead of modifying in place, the clog, and how this compares to InnoDB's undo log."
+level: "Core"
+accent: "#336791"
+readingTime: "13 min read"
+updated: 2026-09-07
+order: 52
+series: "Postgres"
+part: 2
+---
+
+import Callout from '../../components/Callout.astro';
+
+*Postgres deep-dive · Part 2 of 11. Prev: [The heap](/postgres-01-storage-and-heap/). Next: [VACUUM, autovacuum, and the dead-tuple problem](/postgres-03-vacuum/).*
+
+Multi-version concurrency control is the mechanism that lets readers and writers
+coexist without blocking each other. Both Postgres and InnoDB implement MVCC,
+and they deliver the same user-visible promise: a `SELECT` never blocks a
+`UPDATE`, and concurrent transactions see a consistent snapshot. But the
+*mechanism* is completely different, and the operational consequences of that
+difference show up in production every day.
+
+InnoDB updates rows in place and stores the old versions in a separate undo log.
+When a reader needs an old version, it reconstructs it by replaying undo entries.
+Postgres does the opposite: it never modifies a row in place. Every row version —
+past and present — is a full physical tuple sitting in the heap. There is no undo
+log for row data.
+
+One sentence is the whole model: **in Postgres, every write is a new tuple in
+the heap; readers choose which tuple to see by checking transaction metadata
+hidden inside each row**.
+
+## The three hidden columns
+
+Every heap tuple carries three system columns that are normally invisible but
+always present:
+
+- **`xmin`** — the transaction ID (XID) that created this tuple. A tuple is
+  born visible to its creator's transaction.
+- **`xmax`** — the XID that deleted or superseded this tuple. Zero means the
+  tuple is still live; a non-zero value means a transaction has marked this
+  tuple deleted.
+- **`ctid`** — the physical address of this tuple: `(page_number, line_offset)`.
+  After an UPDATE, the old tuple's ctid stays the same but points at dead data;
+  the new tuple has a new ctid.
+
+```sql
+-- Inspect the hidden columns directly
+SELECT ctid, xmin, xmax, id, email
+FROM users
+ORDER BY ctid
+LIMIT 5;
+
+--   ctid  | xmin  | xmax |  id  |        email
+-- --------+-------+------+------+---------------------
+--  (0,1)  | 12345 |    0 |    1 | alice@example.com
+--  (0,2)  | 12345 |    0 |    2 | bob@example.com
+--  (0,3)  | 12346 |    0 |    3 | carol@example.com
+```
+
+`xmax = 0` on all three rows: they're live. Now let's trace each write
+operation.
+
+## INSERT, DELETE, UPDATE — what actually happens
+
+**INSERT**: A new tuple is written to a heap page. `xmin` = current XID,
+`xmax` = 0. The tuple is immediately visible to its creator and, once the
+transaction commits, to any transaction that needs to see the committed state.
+
+**DELETE**: Postgres doesn't remove the row. It finds the existing tuple and
+sets `xmax` = current XID. The tuple is still physically in the heap; it's now
+marked as deleted-by-this-transaction. Once the transaction commits, the tuple
+becomes a dead tuple — invisible to new readers, but still occupying space.
+
+**UPDATE**: This is the one that surprises people. Postgres issues an UPDATE as
+**delete + insert**. The existing tuple gets `xmax` = current XID (marking it
+deleted). A brand-new tuple is written to the heap with all the new column
+values, `xmin` = current XID, `xmax` = 0.
+
+```sql
+-- Before update: one tuple at (0,1) with xmax=0
+UPDATE users SET email = 'alice2@example.com' WHERE id = 1;
+
+-- After update: old tuple at (0,1) now has xmax=current_xid
+-- New tuple at (1,4) with xmin=current_xid, xmax=0
+SELECT ctid, xmin, xmax, email FROM users WHERE id = 1;
+--  ctid  |  xmin  | xmax |        email
+-- -------+--------+------+--------------------
+--  (1,4) | 12347  |    0 | alice2@example.com
+```
+
+The ctid changed from `(0,1)` to `(1,4)`. The old tuple at `(0,1)` still
+exists in the heap — it's just invisible to transactions that started after the
+commit.
+
+<Callout type="insight" title="Every UPDATE rewrites the whole row">
+  Postgres writes a complete new tuple on every UPDATE — all columns, not just
+  the ones you changed. If your `orders` table has 30 columns and you update
+  `status`, Postgres writes all 30 columns to a new heap location. Indexes on
+  *every* column of that table get a new entry pointing to the new TID. The
+  escape valve — HOT updates — is the main topic of Part 3.
+</Callout>
+
+## Visibility: how a reader picks the right version
+
+When a transaction starts (or when a statement starts under `READ COMMITTED`),
+it takes a **snapshot** of which transactions are committed, in-progress, or
+aborted. For each candidate tuple, the reader checks:
+
+1. Is `xmin` committed and visible to my snapshot? (The tuple was created.)
+2. Is `xmax` absent (`0`), or not yet committed, or after my snapshot? (The
+   tuple hasn't been deleted from my perspective.)
+
+If both conditions hold, the tuple is visible. Otherwise, it's skipped. This is
+pure in-memory tuple-header inspection — no locks, no waiting. A `SELECT` on a
+hot table never blocks.
+
+This is why Postgres can have hundreds of versions of the same row in the heap
+at once. Each running transaction sees exactly the set of tuples that were
+committed at the start of its snapshot. The heap is one big multi-version store
+and readers navigate it by checking xmin/xmax.
+
+## ROLLBACK: O(1) regardless of how many rows you changed
+
+Here is the operational consequence that surprises most MySQL developers.
+
+In InnoDB, a rollback replays the undo log in reverse, restoring each row to
+its previous state. A transaction that inserted 5 million rows and then rolled
+back must undo 5 million inserts — one by one. Rollback time is proportional
+to work done.
+
+In Postgres, there is no undo log to replay. When a transaction is rolled
+back, Postgres flips **one bit** in the commit log (`pg_xact`, formerly called
+`clog`) marking that XID as aborted. The tuples in the heap are untouched.
+Their `xmin` still points at the aborted XID. Future readers check the clog,
+see "aborted," and skip those tuples. The rollback is O(1) — constant time,
+regardless of row count.
+
+```sql
+BEGIN;
+INSERT INTO orders SELECT ... FROM generate_series(1, 5000000);
+-- five million rows written to the heap
+ROLLBACK;
+-- one bit flipped in pg_xact — done in milliseconds
+```
+
+The tradeoff: Postgres pays at vacuum time instead of rollback time. Those 5
+million rolled-back tuples still physically occupy heap space. They're dead
+tuples and must eventually be cleaned up by VACUUM. But the application never
+waits for that cleanup — rollback is instant.
+
+<Callout type="gotcha" title="Rolled-back inserts still bloat the table">
+  A 5M-row insert that rolls back leaves 5M dead tuples in the heap. The table
+  is physically larger than before the transaction, even though the transaction
+  "didn't happen." VACUUM will reclaim the space, but until it runs, the table
+  occupies those pages. If you bulk-load and roll back frequently, autovacuum
+  pressure increases.
+</Callout>
+
+## Long transactions and the bloat connection
+
+The flip side of the snapshot model: every running transaction pins an **xmin
+horizon**. Vacuum can only remove dead tuples that are invisible to *all* active
+snapshots. If transaction T is running a long read and its snapshot is from 6
+hours ago, vacuum cannot remove any dead tuple whose deleting XID committed after
+T's snapshot started — because T might still need to see those rows as they were
+when it began.
+
+This is a cluster-wide effect. One long transaction on one table prevents vacuum
+from cleaning dead tuples on *every* table across the entire cluster — even
+tables that transaction never touched. The dead tuples aren't visible to anyone
+new, but the open snapshot's horizon pins them in place.
+
+```sql
+-- Find long-running transactions (the bloat source)
+SELECT pid, now() - xact_start AS duration, state, query
+FROM pg_stat_activity
+WHERE xact_start IS NOT NULL
+ORDER BY duration DESC;
+```
+
+Monitor this. A report query left open overnight is the most common cause of
+unexpected table bloat in Postgres clusters.
+
+## The misconception
+
+> "Postgres and MySQL both give you MVCC snapshots — it's basically the same
+> mechanism."
+
+The user-visible contract is identical. The mechanism is opposite. InnoDB holds
+one physical row version in the table and reconstructs old versions from the undo
+log. Postgres holds *every* version in the table and reads old versions directly.
+The operational consequences:
+
+| | InnoDB | Postgres |
+|---|---|---|
+| Old versions stored in | Undo log (separate) | Heap (in-table) |
+| UPDATE | Modifies in place | Writes new tuple |
+| ROLLBACK cost | O(rows changed) | O(1) — one clog bit |
+| Long transactions cause | Undo log growth, slow reads | Heap bloat, vacuum blockage |
+| Cleanup mechanism | Undo log purge (automatic) | VACUUM |
+
+Understanding this table is the prerequisite for understanding why VACUUM is not
+optional, why large batches that roll back are surprisingly cheap in Postgres,
+and why a long-running query can cause bloat on tables it never touches.
+
+## Where this goes next
+
+Dead tuples accumulate in the heap after every UPDATE and DELETE — and now you
+know why. Part 3 is about what VACUUM does with them: how it reclaims space,
+how HOT updates let some UPDATEs avoid leaving dead tuples at all, and the one
+scenario where vacuum can't run and the consequences are severe.

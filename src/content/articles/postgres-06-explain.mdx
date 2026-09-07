@@ -1,0 +1,247 @@
+---
+title: "Reading EXPLAIN ANALYZE"
+subtitle: "The plan is a tree. The diagnosis is always one number wrong — find it, and everything else follows."
+description: "How to read Postgres EXPLAIN ANALYZE BUFFERS: plan nodes, startup vs total cost, actual rows vs estimates, loops, bitmap scans, and the five red flags to look for."
+level: "Core"
+accent: "#336791"
+readingTime: "14 min read"
+updated: 2026-09-07
+order: 56
+series: "Postgres"
+part: 6
+---
+
+import Callout from '../../components/Callout.astro';
+
+*Postgres deep-dive · Part 6 of 11. Prev: [The index toolbox: beyond the B-tree](/postgres-05-index-types/). Next: [The planner and where estimates come from](/postgres-07-planner/).*
+
+MySQL's EXPLAIN output is a table: one row per table access, with columns for
+access type, rows, key, and extra flags. Postgres's EXPLAIN is a **tree**: plan
+nodes nested inside each other, with execution flowing bottom-up from the leaves.
+The shapes are different, but the diagnostic skill is the same — find the node
+where the planner's estimate and the actual execution diverged the most. That
+node is where the bad plan began.
+
+One sentence describes the entire diagnostic method: **find the deepest node
+where `rows` (estimated) diverges most from `actual rows` (measured), and read
+the plan backward from there to understand every wrong decision the planner
+made as a consequence.**
+
+## The invocation
+
+```sql
+-- Wrap DML in BEGIN/ROLLBACK when using ANALYZE
+-- to actually execute without committing.
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT o.id, o.total, u.email
+FROM orders o
+JOIN users u ON u.id = o.user_id
+WHERE o.status = 'pending'
+  AND o.created_at > now() - interval '7 days'
+ORDER BY o.created_at DESC
+LIMIT 20;
+```
+
+`ANALYZE` actually runs the query and measures real timings and row counts. Use
+`BEGIN`/`ROLLBACK` around any DML (UPDATE, DELETE, INSERT) you `EXPLAIN` with
+`ANALYZE` — otherwise the change commits.
+
+`BUFFERS` adds cache vs disk statistics. Two runs of the same plan with the
+same results but different latencies? Check `shared hit` (buffer pool) vs
+`shared read` (disk). That ratio tells you whether the difference is I/O or
+computation.
+
+## Anatomy of a node
+
+```
+Limit  (cost=0.84..1.06 rows=20 width=60)
+       (actual time=0.042..0.053 rows=20 loops=1)
+  ->  Sort  (cost=0.84..0.89 rows=20 width=60)
+             (actual time=0.041..0.047 rows=20 loops=1)
+        Sort Key: o.created_at DESC
+        Sort Method: quicksort  Memory: 26kB
+        ->  Nested Loop  (cost=0.43..0.62 rows=20 width=60)
+                          (actual time=0.022..0.030 rows=20 loops=1)
+              ->  Index Scan using idx_orders_status_created on orders o
+                    (cost=0.29..0.38 rows=1 width=36)
+                    (actual time=0.010..0.012 rows=20 loops=1)
+                    Index Cond: (status = 'pending' AND created_at > ...)
+              ->  Index Scan using users_pkey on users u
+                    (cost=0.14..0.16 rows=1 width=24)
+                    (actual time=0.001..0.001 rows=1 loops=20)
+                    Index Cond: (id = o.user_id)
+```
+
+**Fields on every node:**
+
+- `cost=startup..total` — planner's estimate in arbitrary cost units (roughly:
+  1.0 = one sequential page read). Startup cost is the time before the first
+  row is produced (important for LIMIT queries). Total is all rows. These are
+  **estimates** — they're the input to the planner's decision, not a measured
+  time.
+- `rows` — estimated row count. This is the number the planner believed.
+- `actual time=X..Y` — measured milliseconds per loop. X = first row, Y = last
+  row. **This is a per-loop average.**
+- `actual rows` — measured rows per loop. **Per-loop average.**
+- `loops` — how many times this node ran.
+
+**The arithmetic trap**: actual time and actual rows are per-loop, not totals.
+A node showing `actual rows=1 loops=9642` produced 9,642 total rows. A node
+showing `actual time=0.480..0.480 loops=9642` spent 0.480ms × 9642 = ~4.6
+seconds — even though the per-loop number looks trivial.
+
+```
+-- Always multiply:
+total_rows = actual_rows × loops
+total_time = actual_time (last value) × loops
+```
+
+## Scan types
+
+**Seq Scan**: reads the heap front-to-back. This is not a failure — for queries
+matching 20–30% of a large table, sequential I/O often beats scattered index
+fetches. A seq scan on a 10,000-row table is frequently the right plan. It's
+only a red flag when the selectivity is low and you'd expect far fewer rows.
+
+**Index Scan**: walks the B-tree, then fetches each matching heap tuple by TID.
+Great for high-selectivity queries (few rows). Degrades for low-selectivity
+(many scattered heap fetches, cache misses).
+
+**Index Only Scan**: covering scan using the index alone, no heap fetch for
+all-visible pages.
+
+```
+Index Only Scan using idx_orders_user_covering on orders
+  Index Cond: (user_id = 42)
+  Heap Fetches: 0      ← all-visible pages, truly index-only
+  Heap Fetches: 4823   ← dirty pages, vacuum behind
+```
+
+`Heap Fetches > 0` means the visibility map has dirty pages. The index is
+being used, but the executor is still fetching heap pages for each dirty-page
+row. Solution: vacuum the table (Part 3).
+
+**Bitmap Index Scan → Bitmap Heap Scan**: the middle ground. The index scan
+phase collects *all* matching TIDs into a bitmap, sorts them by page order,
+then the heap scan reads each needed page once in sequence — avoiding the
+random-access pattern of a plain Index Scan. Multiple indexes can be combined
+with BitmapAnd / BitmapOr.
+
+```
+Bitmap Heap Scan on orders  (actual rows=4891 loops=1)
+  Recheck Cond: (status = 'pending')
+  Rows Removed by Index Recheck: 0
+  ->  Bitmap Index Scan on idx_orders_status  (actual rows=4891 loops=1)
+        Index Cond: (status = 'pending')
+```
+
+Watch for `Rows Removed by Index Recheck: N` in the millions. This means the
+bitmap became lossy (degraded from TID-level to page-granularity) because it
+exceeded `work_mem`. Fix: increase `work_mem` for the session before the query.
+
+<Callout type="insight" title="GIN always returns bitmaps">
+  GIN indexes always produce Bitmap Index Scan nodes — they collect all matching
+  TIDs (potentially across many posting lists) and hand them to a Bitmap Heap
+  Scan. You'll never see a plain Index Scan from a GIN index.
+</Callout>
+
+## The five red flags
+
+**1. Estimated rows off by ≥100× at any node.** This is the root cause of
+almost every bad plan. Find the deepest node with the worst est/actual ratio.
+The planner's wrong belief cascades up the tree: it chose the wrong join type
+because it thought there were 3 outer rows when there were 10,000.
+
+```
+Nested Loop  (cost=... rows=3 width=...)
+             (actual time=4821.3 loops=1 rows=10247)
+  -- Planner estimated 3 outer rows. Got 10,247.
+  -- Each outer row triggered an inner index scan.
+  -- Total NLJ cost: ~4.8 seconds.
+```
+
+**2. Large loops on an expensive inner node.** In a Nested Loop, check whether
+the inner node ran many times (check `loops`) and whether the inner node was
+expensive (check `actual time × loops`). NLJ is only fast when the inner node
+is a cheap index lookup on a small outer set.
+
+**3. `Rows Removed by Filter: N` in the millions.** The index isn't selective
+for this predicate — the scan fetched millions of rows and filtered most of them
+away. Either the index isn't being used for this condition, or there's no useful
+index and a seq scan is running a filter across the full table.
+
+**4. `Sort Method: external merge Disk: 210MB`**. The sort spilled to disk
+(filesort). This single line can add seconds. Fix: `SET work_mem = '256MB'`
+for the session, or increase it globally if the query is common (but memory is
+per-sort-node per-backend, so be careful with global increases).
+
+**5. `Heap Fetches` climbing on Index Only Scan.** Vacuum is behind. The
+covering index exists; it's being used; but every dirty page still triggers a
+heap fetch. Tune autovacuum on the table (Part 3).
+
+## No FORCE INDEX
+
+Postgres ships no hint syntax. `FORCE INDEX` does not exist. The right response
+to a bad plan is to improve the information the planner works with — statistics,
+expressions, extended statistics (Part 7) — not to hardcode a plan choice.
+
+For diagnosis, you can temporarily disable a scan or join type to see what the
+alternative would cost:
+
+```sql
+-- See what the planner would do without sequential scans
+SET enable_seqscan = off;
+EXPLAIN (ANALYZE, BUFFERS) SELECT ...;
+SET enable_seqscan = on;  -- restore immediately
+```
+
+This is for comparison only, never for production configuration.
+
+<Callout type="gotcha" title="Cost is not time — and costs don't compare across queries">
+  `cost=5000` doesn't mean 5 seconds. Cost is unitless — approximately "1.0 =
+  one sequential page read." A cost of 5000 on a table with 10 pages is fine.
+  The same cost on a 100M-row table might be bad. Costs are only comparable
+  within a single plan tree. Never benchmark by comparing costs across different
+  queries.
+</Callout>
+
+## The diagnosis workflow
+
+1. Run `EXPLAIN (ANALYZE, BUFFERS)`.
+2. Find the node(s) where `actual rows × loops` diverges most from `rows`
+   (estimated). Multiply — don't compare per-loop values to totals.
+3. Read the plan **from the planner's beliefs forward**: "The planner believed
+   there were N outer rows. Because of that belief, it chose NLJ over hash
+   join. At N actual rows, NLJ cost is this much."
+4. The fix addresses the *belief*, not the execution. Wrong beliefs come from
+   stale/insufficient statistics (Part 7 covers this in depth).
+
+<Callout type="insight" title="actual time is inclusive of children">
+  Each node's `actual time` includes the time spent in all its children. To
+  find where time actually originates, subtract children from parents. A Sort
+  node with 500ms that has a 499ms child did 1ms of sorting — the 499ms was
+  the scan feeding it.
+</Callout>
+
+## The misconception
+
+> "EXPLAIN says Seq Scan — the planner is ignoring my index. I need to force it."
+
+Three real causes for an unexpected seq scan:
+
+1. **The predicate matches too much.** For 40% of the table, sequential I/O
+   genuinely beats scattered index fetches. The planner is right.
+2. **Statistics are wrong.** The planner thinks 40% of the table matches when
+   only 0.4% does. Run `ANALYZE`, check the estimate, and re-examine.
+3. **The query defeats the index.** A function applied to the indexed column
+   (`WHERE lower(email) = ...` on a plain `email` index) makes the index
+   invisible. Add an expression index matching the query form.
+
+None of these are fixed by forcing the index. They're fixed by fixing the
+problem.
+
+## Where this goes next
+
+Part 6 shows you what's wrong. Part 7 explains why — where row estimates come
+from, when they go wrong, and the tools Postgres gives you to fix them without
+touching the query itself.

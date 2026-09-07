@@ -1,0 +1,272 @@
+---
+title: "JSONB and document modeling"
+subtitle: "A real document type inside your relational database — but its indexing rules are stricter than they look, and the GIN index only helps half your queries."
+description: "Postgres jsonb: json vs jsonb, the operator families (navigation vs containment), GIN opclasses, when to use jsonb_path_ops, and the judgment call between columns and documents."
+level: "Core"
+accent: "#336791"
+readingTime: "13 min read"
+updated: 2026-09-07
+order: 59
+series: "Postgres"
+part: 9
+---
+
+import Callout from '../../components/Callout.astro';
+
+*Postgres deep-dive · Part 9 of 11. Prev: [Transactions, isolation, and locking](/postgres-08-transactions/). Next: [Transactional DDL and safe migrations](/postgres-10-migrations/).*
+
+Postgres's `jsonb` type is genuinely first-class: binary-parsed, GIN-indexable,
+and queryable with a rich operator set. It makes a large category of "do I need
+a document database?" questions answerable with "no" — at least at application
+scale.
+
+But `jsonb` has one trap that catches almost everyone: **the operators split
+into two families that serve completely different query shapes, and GIN only
+helps one of them.** Use the wrong operator and you get a silent seq scan even
+with a GIN index on the column.
+
+## json vs jsonb: always jsonb
+
+`json` stores raw text — preserving whitespace, key order, and even duplicate
+keys. It re-parses on every access. It cannot be GIN-indexed for containment
+queries. Its only advantage is round-trip fidelity (the stored text matches the
+input exactly).
+
+`jsonb` stores a binary representation — keys deduplicated and sorted, whitespace
+removed. It's faster to read (no parse step), supports GIN indexing, and
+accepts the full operator set. The only cost is slightly more CPU on write (the
+parse happens at insert time, not query time).
+
+Default: always `jsonb`.
+
+## The two operator families
+
+The operators split into two families. **Do not mix them in a query, and do not
+expect GIN to help with the wrong one.**
+
+### Family 1: Navigation (extract a value)
+
+These operators reach into a document and pull out a piece of it. They do not
+filter rows by document content.
+
+| Operator | Input | Output | Meaning |
+|----------|-------|--------|---------|
+| `->` | key or index | `jsonb` | Extract value as jsonb |
+| `->>` | key or index | `text` | Extract value as text |
+| `#>` | path array | `jsonb` | Extract at path, return jsonb |
+| `#>>` | path array | `text` | Extract at path, return text |
+
+Mnemonic: **double-arrow = text output**.
+
+```sql
+-- Single-level extraction:
+SELECT payload -> 'status'       -- returns jsonb: "pending"
+SELECT payload ->> 'status'      -- returns text:  pending
+
+-- Multi-level path:
+SELECT payload #> ARRAY['address','city']   -- returns jsonb: "London"
+SELECT payload #>> ARRAY['address','city']  -- returns text:  London
+
+-- Arithmetic on nested numeric value: must use #>> then cast
+SELECT (payload #>> ARRAY['cart','total'])::numeric
+FROM orders
+WHERE id = 42;
+-- Cannot cast jsonb directly to numeric — must extract as text first
+```
+
+### Family 2: Containment and filter (does this document contain X?)
+
+These operators test whether a document satisfies a condition. They filter rows.
+GIN indexes help with these.
+
+| Operator | Meaning |
+|----------|---------|
+| `@>` | Left contains right (right is a subset of left) |
+| `<@` | Right contains left |
+| `?` | Top-level key exists |
+| `?|` | Any of these keys exist |
+| `?&` | All of these keys exist |
+| `@?` | JSONPath exists check |
+| `@@` | JSONPath match |
+
+```sql
+-- Containment: rows where payload contains this sub-document
+SELECT id FROM orders WHERE payload @> '{"status":"pending"}';
+
+-- Existence: rows that have a 'coupon_code' key at the top level
+SELECT id FROM orders WHERE payload ? 'coupon_code';
+
+-- JSONPath: flexible deep-path queries
+SELECT id FROM orders WHERE payload @? '$.cart.items[*].sku ? (@ == "ABC123")';
+```
+
+<Callout type="gotcha" title="Containment is @>, not ->">
+  The most common operator confusion: `WHERE payload -> '{"status":"pending"}'`
+  is NOT a filter. The `->` operator extracts the value at the key literally
+  named `'{"status":"pending"}'` — which doesn't exist, so it returns NULL for
+  every row and the query returns nothing. The filter is `WHERE payload @>
+  '{"status":"pending"}'`. The left side is the document column; the right side
+  is the sub-document to match.
+</Callout>
+
+## GIN indexes and what they actually cover
+
+A GIN index on a `jsonb` column covers **containment and existence operators
+only** — the Family 2 operators. It does not help navigation operators.
+
+```sql
+-- This index helps @>, ?, ?|, ?&, @?, @@:
+CREATE INDEX idx_orders_payload ON orders USING gin(payload);
+
+-- Uses the index:
+WHERE payload @> '{"status":"pending"}'
+WHERE payload ? 'coupon_code'
+
+-- Does NOT use the index — seq scan:
+WHERE payload ->> 'status' = 'pending'
+WHERE payload -> 'status' = '"pending"'::jsonb
+```
+
+The last two lines look like they should be equivalent to the first, but they
+aren't. Navigation-equality (`->> 'key' = 'value'`) is opaque to GIN. The GIN
+index is built on element-by-element containment, not on extracting a value and
+comparing it.
+
+### Fix for navigation-equality: expression B-tree
+
+If you frequently filter by `payload ->> 'status' = 'active'`, create an
+expression index that matches the query form exactly:
+
+```sql
+CREATE INDEX idx_orders_status_extracted
+  ON orders ((payload ->> 'status'));
+
+-- Now this query uses the B-tree:
+WHERE payload ->> 'status' = 'pending'
+```
+
+But be aware of the HOT implication (Part 3): an expression index on the
+`jsonb` column means any update to *any key* in `payload` fans out to this
+index and disqualifies HOT for that row.
+
+### GIN opclasses: jsonb_ops vs jsonb_path_ops
+
+Two opclasses are available for GIN on jsonb:
+
+**`jsonb_ops`** (default): indexes every key and every value separately.
+Supports `@>`, `?`, `?|`, `?&`. Index entries for a document
+`{"brand":"Acme","tags":["sale","new"]}` include entries for `"brand"`,
+`"Acme"`, `"tags"`, `"sale"`, `"new"` — key names and values separately.
+
+**`jsonb_path_ops`**: indexes hashes of full root-to-value paths only.
+The same document produces entries for `{"brand","Acme"}`, `{"tags","sale"}`,
+`{"tags","new"}` as hashed pairs. Supports **only `@>`**. Approximately 2–3×
+smaller index, 2–3× faster for containment-only queries.
+
+```sql
+-- Default (supports @>, ?, ?|, ?&):
+CREATE INDEX idx_payload_default ON orders USING gin(payload);
+
+-- Path-ops (supports only @>, but smaller and faster for it):
+CREATE INDEX idx_payload_path ON orders USING gin(payload jsonb_path_ops);
+```
+
+Decision rule: if you need `?` existence checks, you must use `jsonb_ops`. If
+your queries are exclusively `@>` containment, `jsonb_path_ops` is better.
+
+## Modeling judgment: columns vs document
+
+Every column update rewrites the entire `jsonb` value (because of the full-row
+rewrite from Part 2). A GIN index on the column means that every jsonb update
+fans out to the GIN index and prevents HOT. This is the key cost to model:
+
+- A frequently-updated field inside `jsonb` causes repeated full-row writes
+  and GIN index maintenance. If the field is also used in a filter, consider
+  promoting it to a typed column.
+
+The judgment call has a pattern:
+
+**Promote to a column when the field:**
+- Participates in relational logic (FK, uniqueness, constraint enforcement)
+- Is filtered or sorted frequently with range semantics
+- Is updated on its own (separate from the rest of the document)
+- Has stable cardinality and a well-defined type
+
+**Leave in the document when the field:**
+- Has a variable or user-defined schema (per-product attributes, third-party
+  payloads)
+- Is sparse (only some rows have it)
+- Is part of a write-once payload (event metadata, audit log context)
+- Is part of a large collection of similar low-use attributes
+
+**Hybrid is idiomatic Postgres**: a typed relational skeleton of promoted columns
+plus one `jsonb` for the long tail.
+
+```sql
+CREATE TABLE orders (
+  id          uuid PRIMARY KEY DEFAULT uuidv7(),
+  user_id     bigint NOT NULL REFERENCES users(id),
+  total       numeric(10,2) NOT NULL,        -- promoted: relational, filtered
+  status      order_status NOT NULL,          -- promoted: relational, indexed
+  created_at  timestamptz NOT NULL DEFAULT now(),  -- promoted: indexed, ordered
+  metadata    jsonb                           -- document: variable third-party data
+);
+```
+
+<Callout type="insight" title="Hot counters inside jsonb are a bloat generator">
+  `UPDATE orders SET metadata = jsonb_set(metadata, '{view_count}', '42')` rewrites
+  the entire `jsonb` value, writes a new heap tuple, and fans out to every index
+  on the `orders` table — never HOT. A view-count inside a jsonb column on a
+  hot table is a significant write amplifier. Promote frequently-written numeric
+  counters to their own columns where they can benefit from HOT and smaller heap
+  updates.
+</Callout>
+
+## The worked schema
+
+Revisiting the payments table from Part 4 with jsonb decisions explicit:
+
+```sql
+CREATE TABLE payments (
+  id              uuid PRIMARY KEY DEFAULT uuidv7(),
+  order_id        uuid NOT NULL REFERENCES orders(id),
+  amount          numeric(8,2) NOT NULL,   -- promoted: money, filtered, summed
+  status          payment_status NOT NULL, -- promoted: enum, filtered
+  created_at      timestamptz NOT NULL DEFAULT now(),  -- promoted: sorted
+  captured_at     timestamptz,             -- promoted: filtered in reports
+  metadata        jsonb,                   -- document: provider response, tags, flags
+  -- GIN for containment queries on metadata:
+  -- CREATE INDEX ON payments USING gin(metadata jsonb_path_ops);
+  -- Expression B-tree for ->> equality on provider_id in metadata:
+  -- CREATE INDEX ON payments ((metadata ->> 'provider_id'));
+  CONSTRAINT chk_positive CHECK (amount > 0)
+);
+```
+
+## The misconception
+
+> "Postgres JSONB means I can go schemaless like a document database."
+
+Two realities:
+
+1. **GIN accelerates `@>` and `?`. Navigation-equality (`->> 'key' = 'val'`)
+   silently seq-scans** until you add an expression B-tree for that specific
+   path. Unlike a document database where every field in a document can be
+   indexed by declaring a compound index, Postgres requires explicit per-path
+   expression indexes. You can miss this and have no error — just a slow query.
+
+2. **No enforcement inside the blob.** A typed column has `NOT NULL`, `CHECK`,
+   foreign keys. A `jsonb` value has none of those unless you add
+   `CHECK ((payload ->> 'status') IS NOT NULL)` explicitly. A typo'd key
+   produces no error on write; it produces NULL on read.
+
+Neither of these is a reason not to use `jsonb` — it's an excellent tool for
+the right shape of problem. But "schemaless" undersells what you're giving up
+when you put structured data into a blob.
+
+## Where this goes next
+
+Part 9 completes the data modeling stack. Part 10 is about safely evolving it
+in production: Postgres's transactional DDL, `CREATE INDEX CONCURRENTLY`, the
+lock-strength ladder, and the pattern that lets you add a constraint to a large
+live table without blocking reads.

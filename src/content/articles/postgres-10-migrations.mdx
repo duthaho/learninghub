@@ -1,0 +1,287 @@
+---
+title: "Transactional DDL and safe migrations"
+subtitle: "DDL participates in MVCC — wrap three ALTERs in a BEGIN and roll them all back. Just don't confuse atomic with non-blocking."
+description: "Postgres transactional DDL, CREATE INDEX CONCURRENTLY and why it can't be in a transaction, lock strengths, the NOT VALID + VALIDATE pattern, and declarative partitioning basics."
+level: "Advanced"
+accent: "#336791"
+readingTime: "14 min read"
+updated: 2026-09-07
+order: 60
+series: "Postgres"
+part: 10
+---
+
+import Callout from '../../components/Callout.astro';
+
+*Postgres deep-dive · Part 10 of 11. Prev: [JSONB and document modeling](/postgres-09-jsonb/). Next: [WAL, replication, and production concerns](/postgres-11-wal-replication/).*
+
+In MySQL, most DDL implicitly commits the current transaction and starts a new
+one. A migration that fails on step 4 of 6 leaves the schema half-changed with
+no way to roll back automatically. You reach for `pt-online-schema-change` or
+`gh-ost` not because the DDL is slow, but because it's locked and non-atomic.
+
+In Postgres, DDL is **transactional**. `CREATE TABLE`, `ALTER TABLE`, `ADD
+COLUMN`, `ADD CONSTRAINT`, `DROP INDEX` — all of them participate in MVCC.
+Wrap a sequence of DDL statements in `BEGIN`/`COMMIT` and if anything fails,
+everything rolls back.
+
+But there's a distinction you must internalize: **transactional ≠ non-blocking.**
+Those are independent properties. A DDL wrapped in a transaction is atomic and
+safe to roll back. Whether it blocks concurrent reads or writes during execution
+is a separate question, answered by the lock it takes.
+
+## Transactional DDL: the rollback guarantee
+
+Schema objects in Postgres — tables, indexes, columns, constraints — are catalog
+rows in `pg_class`, `pg_attribute`, `pg_constraint`. Those rows have `xmin` and
+`xmax` just like heap tuples. DDL operations are MVCC writes on the catalog.
+
+```sql
+BEGIN;
+
+ALTER TABLE orders ADD COLUMN notes text;
+CREATE INDEX idx_orders_status ON orders (status);
+ALTER TABLE orders ADD CONSTRAINT chk_total CHECK (total >= 0);
+
+-- Something fails here, or we decide to roll back:
+ROLLBACK;
+
+-- The column, index, and constraint were never committed.
+-- pg_class and pg_attribute show no trace of them.
+\d orders  -- unchanged
+```
+
+This is the migration's safety net. A complex 6-step migration inside a
+transaction either completes atomically or disappears atomically. No partial
+states, no manual rollback steps.
+
+MySQL note: this behavior is fundamental and does not require any special
+configuration. It simply works in Postgres.
+
+## CREATE INDEX CONCURRENTLY: the one DDL exception
+
+`CREATE INDEX` takes a lock that blocks writes for the duration of the build.
+On a 500M-row table, that's minutes of downtime.
+
+`CREATE INDEX CONCURRENTLY` (CIC) builds the index without blocking writes:
+
+1. First pass: builds the index, allowing concurrent writes. Marks the index
+   invalid.
+2. Second pass: processes the changes that arrived during the first pass.
+3. Third pass: validates and marks the index valid.
+
+**The catch**: CIC manages its own internal transaction protocol. It cannot run
+inside a `BEGIN`/`COMMIT` block:
+
+```sql
+-- This fails:
+BEGIN;
+CREATE INDEX CONCURRENTLY idx_orders_user ON orders (user_id);
+-- ERROR: CREATE INDEX CONCURRENTLY cannot run inside a transaction block
+
+-- Correct: run without a transaction wrapper
+CREATE INDEX CONCURRENTLY idx_orders_user ON orders (user_id);
+```
+
+If CIC fails mid-build, it leaves an **INVALID** index:
+
+```sql
+\d orders
+-- Indexes:
+--   idx_orders_user  btree (user_id)  INVALID
+
+-- The invalid index is ignored by the planner but still adds write overhead.
+-- Drop and retry:
+DROP INDEX CONCURRENTLY idx_orders_user;
+CREATE INDEX CONCURRENTLY idx_orders_user ON orders (user_id);
+```
+
+Always verify after CIC: check `\d tablename` or `pg_indexes` to confirm the
+index is valid before assuming it's serving queries.
+
+Migration tools that use CIC need special handling. In Rails:
+`add_index :orders, :user_id, algorithm: :concurrently` with
+`disable_ddl_transaction!` at the migration class level.
+
+## Lock strengths: which operations are safe on live tables
+
+Postgres has a hierarchy of lock modes. The one that matters most for migrations
+is `ACCESS EXCLUSIVE` — it blocks everything, including plain `SELECT`. Getting
+this lock on a large busy table means waiting until all in-progress queries on
+the table finish, then blocking all new ones until the DDL completes.
+
+**Metadata-only operations (brief ACCESS EXCLUSIVE, safe on live tables):**
+
+```sql
+-- Adding a column with a constant non-volatile default:
+-- Since PG 11, this is a metadata-only operation — no table rewrite!
+ALTER TABLE orders ADD COLUMN archived boolean NOT NULL DEFAULT false;
+
+-- DROP COLUMN: marks the column invisible; vacuum reclaims later:
+ALTER TABLE orders DROP COLUMN legacy_field;
+
+-- ADD CONSTRAINT NOT VALID: enforces going-forward, no row scan:
+ALTER TABLE orders
+  ADD CONSTRAINT chk_positive CHECK (total >= 0) NOT VALID;
+```
+
+**The old pattern (add nullable, backfill, add NOT NULL) is obsolete since PG
+11** for constant defaults. If the default is volatile (like `now()` per row,
+or `random()`), a table rewrite is still required because each row needs a
+computed value.
+
+**Operations requiring a row scan (long ACCESS EXCLUSIVE, avoid on live tables):**
+
+```sql
+-- Changing a column type that requires a rewrite:
+ALTER TABLE orders ALTER COLUMN legacy_id TYPE bigint;  -- may or may not rewrite
+
+-- Adding a CHECK constraint that must validate existing rows:
+ALTER TABLE orders ADD CONSTRAINT chk_total CHECK (total >= 0);
+-- This scans all rows while holding ACCESS EXCLUSIVE
+```
+
+## The lock-queue trap
+
+`ACCESS EXCLUSIVE` requests queue behind existing shared locks. But here's the
+trap: while the exclusive request is waiting, it blocks ALL subsequent requests
+behind it — including plain `SELECT`s.
+
+```
+Timeline:
+  T=0:   Long SELECT query starts on `orders` (holds shared lock)
+  T=10s: Your ALTER TABLE arrives, queues behind the SELECT
+  T=10s: Every new SELECT on `orders` now queues behind the ALTER
+  T=32s: Long SELECT finishes, ALTER acquires lock, executes in 5ms, releases
+  T=32s: Queued SELECTs all proceed
+
+  -- Your "quick ALTER" caused 22 seconds of read blockage
+```
+
+Defense: `SET lock_timeout` before risky DDL. If you can't acquire the lock
+within the timeout, fail fast rather than queue indefinitely:
+
+```sql
+SET lock_timeout = '2s';
+ALTER TABLE orders ADD COLUMN notes text NOT NULL DEFAULT '';
+RESET lock_timeout;
+```
+
+If the ALTER times out, retry when traffic is lower. An ALTER that errors is
+better than an ALTER that blocks all readers for 30 seconds.
+
+## The NOT VALID + VALIDATE pattern
+
+The production-safe way to add a constraint to a large live table:
+
+**Step 1**: Add the constraint with `NOT VALID`. Takes a brief `ACCESS EXCLUSIVE`
+lock, marks the constraint active for new rows, does not scan existing rows.
+
+```sql
+-- Brief lock, no row scan:
+ALTER TABLE orders
+  ADD CONSTRAINT chk_total_positive CHECK (total >= 0) NOT VALID;
+```
+
+**Step 2**: Validate the constraint against existing rows. Takes `SHARE UPDATE
+EXCLUSIVE` lock — allows concurrent reads and writes while scanning.
+
+```sql
+-- Concurrent with reads and writes, can take minutes on large tables:
+ALTER TABLE orders VALIDATE CONSTRAINT chk_total_positive;
+```
+
+After Step 2, the constraint is fully enforced. Total blockage: the brief
+ACCESS EXCLUSIVE window in Step 1 (milliseconds). The full-table scan happens
+in Step 2 under a lock that doesn't block application traffic.
+
+<Callout type="gotcha" title="BEGIN/COMMIT doesn't help one-shot constraint validation">
+  Wrapping `ADD CONSTRAINT ... CHECK ...` (without `NOT VALID`) in a
+  transaction doesn't make it safe. It still takes ACCESS EXCLUSIVE and scans
+  all rows while holding it — the transaction just means it also holds that
+  lock for the full scan duration. The split pattern (NOT VALID then VALIDATE)
+  is what makes constraint addition production-safe.
+</Callout>
+
+The same pattern works for creating a unique constraint: build the index with
+CIC first, then add the constraint using the already-built index:
+
+```sql
+-- Step 1: build the index concurrently (no write blocking):
+CREATE UNIQUE INDEX CONCURRENTLY idx_users_email ON users (lower(email));
+
+-- Step 2: add constraint using existing index (brief lock, no build):
+ALTER TABLE users
+  ADD CONSTRAINT uq_email UNIQUE USING INDEX idx_users_email;
+```
+
+## Declarative partitioning basics
+
+Postgres declarative partitioning (`PARTITION BY RANGE/LIST/HASH`) is the
+right tool for time-series data with a retention policy:
+
+```sql
+CREATE TABLE events (
+  id         uuid NOT NULL DEFAULT uuidv7(),
+  user_id    bigint NOT NULL,
+  event_type text NOT NULL,
+  created_at timestamptz NOT NULL,
+  payload    jsonb
+) PARTITION BY RANGE (created_at);
+
+CREATE TABLE events_2026_09
+  PARTITION OF events
+  FOR VALUES FROM ('2026-09-01') TO ('2026-10-01');
+
+CREATE TABLE events_2026_10
+  PARTITION OF events
+  FOR VALUES FROM ('2026-10-01') TO ('2026-11-01');
+```
+
+**The key operational win**: dropping an old partition is an instant metadata
+operation.
+
+```sql
+-- Drop 90-day-old data — no DELETE storm, no dead tuples, no vacuum pressure:
+ALTER TABLE events DETACH PARTITION events_2026_06;
+DROP TABLE events_2026_06;
+```
+
+Compare with: `DELETE FROM events WHERE created_at < '2026-07-01'` on a
+500M-row table — millions of dead tuples, massive vacuum pressure, potentially
+hours of background work. Partition + DROP is instant.
+
+Partition pruning: the planner skips partitions whose range can't overlap the
+query predicate. A `WHERE created_at > now() - '30 days'::interval` query on
+a monthly-partitioned table scans at most 2 partitions regardless of total size.
+
+<Callout type="insight" title="DROP PARTITION is the safe way to retire old data">
+  `DELETE FROM large_table WHERE month = 'old'` creates a dead-tuple storm that
+  burdens autovacuum for hours. `ALTER TABLE events DETACH PARTITION
+  events_old; DROP TABLE events_old;` is instant — no dead tuples, no vacuum
+  work, no I/O spike. The partition must have been planned in advance, but for
+  time-series with retention requirements it's the obvious schema choice.
+</Callout>
+
+## The misconception
+
+> "BEGIN/COMMIT makes my migration safe for production."
+
+Atomic and non-blocking are independent. A migration in a transaction that takes
+`ACCESS EXCLUSIVE` is atomic (either all commits or none) but still blocks all
+reads and writes while it runs. The two tools are complementary, not
+interchangeable:
+
+- **Transactional DDL** gives you atomicity and rollback safety.
+- **CIC + NOT VALID + VALIDATE** give you non-blocking on large live tables.
+
+Use both: run the non-blocking steps, and wrap the ones that must be atomic
+(metadata changes, constraint additions, index drops after migration) in a
+transaction.
+
+## Where this goes next
+
+The schema evolution story is complete. Part 11 is the final part — the
+operational layer: WAL and crash recovery, streaming vs logical replication,
+PgBouncer and why the process-per-connection model makes it necessary, and the
+handful of extensions that should be installed on every new Postgres cluster.
