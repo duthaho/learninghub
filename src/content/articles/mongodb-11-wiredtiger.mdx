@@ -1,0 +1,185 @@
+---
+title: "Under the hood: WiredTiger storage"
+subtitle: "The whole series — write concerns, snapshots, cache pressure, checkpoints — rests on one storage engine. This is how it actually keeps your documents."
+description: "How WiredTiger stores MongoDB documents: B-trees and RecordIds, copy-on-write pages, MVCC without undo, the 60-second checkpoint plus journal durability model, block compression, and document-level concurrency."
+level: "Advanced · Internals"
+accent: "#13AA52"
+readingTime: "13 min read"
+updated: 2026-11-24
+order: 62
+series: "MongoDB"
+part: 11
+recall:
+  - q: "How does WiredTiger physically organise a collection, and how do indexes point into it?"
+    a: "Each collection is its own B-tree file, with documents stored in leaf pages keyed by a hidden 64-bit RecordId. Every index is a separate B-tree mapping index key → RecordId — so a non-covered index read is two B-tree lookups, like Postgres's index → heap hop, not InnoDB's clustered table."
+  - q: "Does WiredTiger ever update a page in place?"
+    a: "No — it's copy-on-write. Updates accumulate as in-memory version chains on the page; reconciliation writes a brand-new page to a new location on disk and the old one becomes garbage. Nothing is overwritten, which is what makes checkpoints consistent without halting writes."
+  - q: "What does the 60-second checkpoint + journal pair guarantee?"
+    a: "A checkpoint is a complete, self-consistent on-disk snapshot — the database can always restart from the last one. The journal (write-ahead log, fsynced every ~100ms or on j:true) covers the gap since that checkpoint. Recovery = last checkpoint + journal replay."
+  - q: "Why can a collection be 10GB on disk but need far more cache to work with?"
+    a: "Blocks are compressed (snappy/zstd) on disk but held uncompressed in WiredTiger's cache (~50% of RAM by default). Disk size understates the working-set footprint — capacity planning off `storageSize` alone undersizes memory."
+  - q: "Two sessions update the same document concurrently — who blocks?"
+    a: "Nobody blocks: concurrency is optimistic at document level. One write wins; the other hits an internal WriteConflict and is transparently retried by the server. Under a hot-document workload those retries burn CPU — the fix is schema design that spreads the heat, not a lock knob."
+---
+
+import Callout from '../../components/Callout.astro';
+
+*MongoDB deep-dive · Part 11 of 11. Previous: [Monitoring & security hardening](/mongodb-10-monitoring/). Back to the [series guide](/mongodb-00-series-intro/).*
+
+Every part of this series leaned on the storage engine without opening it.
+[Write concerns](/mongodb-03-write-read-concerns/) promised `j:true` means
+"journaled" — journaled into *what*? [Monitoring](/mongodb-10-monitoring/) told
+you to watch WiredTiger cache eviction — eviction of *what*, from *where*?
+Snapshot reads, checkpoint stalls, the 50%-of-RAM cache: all machinery we
+treated as a black box. This finale opens the box.
+
+The model to hold: **WiredTiger is a copy-on-write B-tree engine with MVCC in
+memory — documents live in B-tree leaf pages, updates never overwrite anything,
+and durability is a checkpoint every minute plus a journal for the gap.**
+Each clause of that sentence is a section below.
+
+## A B-tree per collection, a B-tree per index
+
+On disk, a MongoDB database is a directory of WiredTiger files: one per
+collection, one per index. Each is a **B-tree** (WiredTiger can do LSM, but
+MongoDB uses B-trees).
+
+The collection B-tree is keyed by a hidden, monotonically increasing 64-bit
+**RecordId**; the values in its leaf pages are your BSON documents. Every
+index — including `_id` — is a *separate* B-tree mapping index key →
+RecordId.
+
+That one sentence settles a question this series has danced around: **MongoDB
+collections are not clustered by `_id`.** A read through an index costs an
+index B-tree descent, then a collection B-tree descent by RecordId — the same
+two-hop shape as Postgres's index→heap lookup, not InnoDB's
+table-is-the-primary-key design. (If you've read the
+[MySQL](/mysql-01-how-innodb-stores-rows/) and
+[Postgres](/postgres-01-storage-and-heap/) series: among the three, MongoDB
+sits with Postgres.) It's also why [covered queries](/mongodb-01-indexes/)
+matter so much — skipping the FETCH stage skips the second B-tree entirely.
+
+<Callout type="note" title="Documents are placed by arrival, not by _id">
+RecordIds are handed out in insertion order, so documents sit roughly in
+arrival order inside the collection file — `ObjectId`'s timestamp prefix has
+nothing to do with placement. Range-scanning on `_id` is an index scan plus
+scattered RecordId lookups, not a sequential sweep. (Time-series collections
+and clustered collections, which key the collection B-tree by a chosen field,
+are the deliberate exception.)
+</Callout>
+
+## Nothing is updated in place
+
+InnoDB updates a page and logs undo. Postgres writes a new heap tuple beside
+the old. WiredTiger does a third thing: **copy-on-write pages with version
+chains in memory.**
+
+When you update a document, WiredTiger does not touch the on-disk page. It
+attaches the change to the page's *in-memory* image as an update record —
+newest first, each stamped with the transaction that made it. Readers walk the
+chain and take the newest version visible to *their* snapshot. That is
+MongoDB's MVCC: no undo log, no dead tuples in the file — versions live in
+cache, attached to pages.
+
+Eventually a dirty page must reach disk. **Reconciliation** takes the
+in-memory image — base page plus surviving updates — and writes it out as a
+**new page at a new location**. The parent is updated (also copy-on-write) to
+point at it; the old block becomes free space for reuse. No page is ever
+overwritten in place.
+
+<Callout type="insight" title="Copy-on-write is why checkpoints don't stop the world">
+Because committed pages are immutable, a checkpoint can walk the tree and
+capture a consistent snapshot *while writes continue* — new writes go to new
+pages and simply aren't part of the snapshot being written. Postgres pays for
+MVCC with VACUUM; InnoDB pays with undo-log history; WiredTiger pays with
+cache pressure — old versions pin pages in memory until no snapshot needs
+them. A long-running snapshot (an open cursor, a long transaction) on a
+write-hot collection is WiredTiger's version of Postgres's "long transaction
+holds back vacuum."
+</Callout>
+
+## The cache: where the engine actually lives
+
+All of this versioning happens in the **WiredTiger cache** — by default
+roughly **50% of RAM minus 1GB**. It holds uncompressed pages, update chains,
+and index pages; it is the engine's working memory, separate from the OS page
+cache that still serves the compressed files underneath.
+
+Two thresholds from [Part 10](/mongodb-10-monitoring/) now have mechanism
+behind them. Background eviction threads try to keep the cache below ~80% full
+and dirty pages below ~5%, reconciling and evicting pages. If the workload
+outruns them (~95% full / ~20% dirty), WiredTiger drafts **application
+threads** into doing eviction work before their own operation proceeds — your
+query's latency spike *is* the engine making it pay the eviction tax. That's
+why "cache used ≥ 95%" and "dirty ≥ 20%" are page-worthy signals, not
+curiosities.
+
+## Checkpoints + journal: the durability contract
+
+WiredTiger makes data durable through two cooperating mechanisms.
+
+A **checkpoint** — every 60 seconds — is a named, complete, self-consistent
+snapshot of every tree, written via the copy-on-write machinery. Once it's
+finished, the database can *always* restart from it, even if the process dies
+mid-way through writing the next one (the previous checkpoint isn't released
+until the new one is complete).
+
+The **journal** is a write-ahead log covering the gap since the last
+checkpoint. Every write appends a journal record; the journal is fsynced every
+~100ms, and *immediately* for any write that asks for `j: true`. Recovery is:
+load the last checkpoint, replay the journal.
+
+This is the floor under [Part 3](/mongodb-03-write-read-concerns/): `j: true`
+means "the journal record for this write hit disk before we acknowledged."
+Without it, an acknowledged write can live only in cache + an unsynced journal
+buffer — a well-timed power cut takes up to ~100ms of acknowledged writes with
+it. And `w: "majority"` implies journaling on a majority of nodes, which is why
+it survives both crashes *and* failovers.
+
+<Callout type="gotcha" title="'The checkpoint runs every minute, so I can lose a minute of data'">
+Backwards on both ends. With the journal on (always, in production), you lose
+at most the journal's sync window — not the checkpoint interval. The
+checkpoint cadence matters for a different cost: *recovery time* (more journal
+to replay) and *checkpoint I/O* (a minute of dirty pages flushed in a burst —
+visible as the periodic write spike on your disk graphs). Checkpoints bound
+replay work; the journal bounds data loss.
+</Callout>
+
+## Compression: disk size is not memory size
+
+WiredTiger compresses **blocks on disk** — snappy by default, zstd for a
+better ratio at slightly more CPU — and applies **prefix compression** to
+index pages (adjacent keys share prefixes; store the delta). Collections often
+land at 2–4× smaller than raw BSON.
+
+The catch, and it bites capacity planning: pages are **uncompressed in
+cache**. A 10GB-on-disk collection can be 30GB of working set. Size memory
+from the data you touch, not from `db.stats().storageSize` — and treat the
+disk number as the *compressed* truth. (The same disk-vs-memory split appears
+in [Elasticsearch](/elasticsearch-07-scale-and-the-write-path/): compressed
+segments on disk, heap structures in RAM. Engines rhyme.)
+
+## Document-level concurrency
+
+WiredTiger takes no row locks in the InnoDB sense. Writes to *different*
+documents proceed fully in parallel. Writes to the *same* document are
+resolved optimistically: both proceed, one commits, the other detects the
+conflict, aborts internally as a **WriteConflict**, and the server retries it
+automatically. You never see an error — you see CPU, because a hot document
+turns into a retry storm.
+
+That's the mechanical reason behind two schema rules this series has already
+argued: spread contended counters across documents (shard the counter), and
+keep [transactions](/mongodb-03-write-read-concerns/) short — a multi-document
+transaction holds its snapshot open, pinning versions in cache and widening
+every conflict window.
+
+---
+
+Full circle: the [ESR rule](/mongodb-01-indexes/) is B-tree key order;
+[covered queries](/mongodb-02-execution-plans/) skip the second B-tree;
+[`j: true`](/mongodb-03-write-read-concerns/) is a journal fsync; the
+[oplog](/mongodb-08-change-streams/) is just another WiredTiger table with a
+snapshot-ordered reader; and the [four monitoring
+signals](/mongodb-10-monitoring/) are this machinery's vital signs. The series
+taught you the behaviour; now you own the machine underneath it.

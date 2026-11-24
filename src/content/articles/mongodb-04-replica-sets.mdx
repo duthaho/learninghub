@@ -9,11 +9,20 @@ updated: 2026-11-24
 order: 55
 series: "MongoDB"
 part: 4
+recall:
+  - q: "What does the pre-vote phase prevent?"
+    a: "Disruption by isolated nodes: a partitioned node would otherwise keep calling elections and bumping the term, forcing healthy primaries to step down. Pre-vote asks 'could I even win?' first."
+  - q: "What bounds how low you can set `electionTimeoutMillis`?"
+    a: "Roughly `2 × heartbeatInterval + max network RTT` — below that you trigger spurious elections. Default 10s; 5–6s only on consistently fast networks."
+  - q: "Why must a replica set have an odd number of voting members?"
+    a: "Elections need a strict majority of votes. An even set tolerates no more failures than the next odd size down, and risks tied availability for no gain — add an arbiter or another member."
+  - q: "What makes a replica set 'a consensus system wearing database clothes'?"
+    a: "Writes go through a single elected leader, replication is log shipping (the oplog), and failover is a Raft-style election with terms, votes, and majorities."
 ---
 
 import Callout from '../../components/Callout.astro';
 
-*MongoDB deep-dive · Part 4 of 10. Previous: [Write concerns & read concerns](/mongodb-03-write-read-concerns/). Next: [Read preferences](/mongodb-05-read-preferences/).*
+*MongoDB deep-dive · Part 4 of 11. Previous: [Write concerns & read concerns](/mongodb-03-write-read-concerns/). Next: [Read preferences](/mongodb-05-read-preferences/).*
 
 A MongoDB replica set is a group of `mongod` instances that maintain the same
 dataset. One is the primary, the rest are secondaries. Data written to the

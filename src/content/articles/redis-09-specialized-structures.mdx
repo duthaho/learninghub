@@ -9,6 +9,15 @@ updated: 2026-08-13
 order: 10
 series: "Redis"
 part: 9
+recall:
+  - q: "Bitmap vs HyperLogLog — both count; how do you choose?"
+    a: "Bitmap: exact, needs dense integer ids, memory grows with id-space. HLL: ~0.81% error, any item type, fixed ~12KB. Exactness + dense ids → bitmap; arbitrary items + tolerance → HLL."
+  - q: "Can you ask a HyperLogLog whether user X is in it?"
+    a: "No — an HLL stores no members, only a sketch yielding the count. Membership needs a Set (exact) or Bloom filter (approximate); per-id booleans need a bitmap."
+  - q: "Why does an HLL fit in 12KB regardless of cardinality?"
+    a: "It deliberately forgets the members — it keeps only hash-pattern statistics sufficient to estimate the count. That forgetting is the feature."
+  - q: "Do specialized structures escape the single-thread rule?"
+    a: "No — a `BITOP` over a week of big bitmaps or a huge `PFCOUNT` merge is still one command on the one thread. Keep them bounded like any `SMEMBERS`."
 ---
 
 import Callout from '../../components/Callout.astro';

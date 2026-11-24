@@ -1,0 +1,228 @@
+---
+// ⌘K search over the static Pagefind index (built post-`astro build`).
+// The pagefind bundle is lazy-loaded on first open; in `astro dev` the index
+// doesn't exist yet, so the dialog degrades to a notice.
+const base = import.meta.env.BASE_URL;
+---
+
+<button id="search-open" class="search-btn" type="button" aria-label="Search articles" title="Search (⌘K)">
+  <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><line x1="16" y1="16" x2="21" y2="21"/></svg>
+  <span class="search-kbd" aria-hidden="true">⌘K</span>
+</button>
+
+<dialog id="search-dialog" class="search-dialog" aria-label="Search">
+  <div class="search-box">
+    <div class="search-row">
+      <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><line x1="16" y1="16" x2="21" y2="21"/></svg>
+      <input id="search-input" type="search" placeholder="Search the map — MVCC, B-tree, BM25…" autocomplete="off" spellcheck="false" />
+      <button id="search-close" class="search-esc" type="button" aria-label="Close search">esc</button>
+    </div>
+    <ol id="search-results" class="search-results" role="listbox"></ol>
+    <p id="search-status" class="search-status"></p>
+  </div>
+</dialog>
+
+<script is:inline define:vars={{ base }}>
+  const dialog = document.getElementById('search-dialog');
+  const input = document.getElementById('search-input');
+  const resultsEl = document.getElementById('search-results');
+  const statusEl = document.getElementById('search-status');
+  let pagefind = null;
+  let active = -1;
+
+  const open = async () => {
+    dialog.showModal();
+    input.value = '';
+    resultsEl.innerHTML = '';
+    statusEl.textContent = '';
+    input.focus();
+    if (!pagefind) {
+      try {
+        pagefind = await import(/* @vite-ignore */ `${base}pagefind/pagefind.js`);
+        pagefind.init();
+      } catch {
+        statusEl.textContent = 'Search index not available in dev — run a production build.';
+      }
+    }
+  };
+  const close = () => dialog.close();
+
+  document.getElementById('search-open')?.addEventListener('click', open);
+  document.getElementById('search-close')?.addEventListener('click', close);
+  dialog.addEventListener('click', (e) => { if (e.target === dialog) close(); });
+
+  document.addEventListener('keydown', (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+      e.preventDefault();
+      dialog.open ? close() : open();
+    } else if (e.key === '/' && !dialog.open) {
+      const t = e.target;
+      if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement) return;
+      e.preventDefault();
+      open();
+    }
+  });
+
+  const render = async (search) => {
+    const results = await Promise.all(search.results.slice(0, 8).map((r) => r.data()));
+    active = -1;
+    resultsEl.innerHTML = results
+      .map(
+        (d, i) => `
+      <li role="option" data-i="${i}">
+        <a href="${d.url}">
+          <span class="r-title">${d.meta?.title ?? d.url}</span>
+          <span class="r-excerpt">${d.excerpt}</span>
+        </a>
+      </li>`
+      )
+      .join('');
+    statusEl.textContent = search.results.length
+      ? `${search.results.length} result${search.results.length === 1 ? '' : 's'}`
+      : 'No results — try a system name or a concept.';
+  };
+
+  let timer;
+  input.addEventListener('input', () => {
+    clearTimeout(timer);
+    const q = input.value.trim();
+    if (!q || !pagefind) {
+      resultsEl.innerHTML = '';
+      if (pagefind) statusEl.textContent = '';
+      return;
+    }
+    timer = setTimeout(async () => {
+      const search = await pagefind.search(q);
+      render(search);
+    }, 120);
+  });
+
+  input.addEventListener('keydown', (e) => {
+    const items = resultsEl.querySelectorAll('li');
+    if (!items.length) return;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      active = e.key === 'ArrowDown'
+        ? (active + 1) % items.length
+        : (active - 1 + items.length) % items.length;
+      items.forEach((li, i) => li.classList.toggle('active', i === active));
+      items[active].scrollIntoView({ block: 'nearest' });
+    } else if (e.key === 'Enter' && active >= 0) {
+      e.preventDefault();
+      items[active].querySelector('a')?.click();
+    }
+  });
+</script>
+
+<style>
+  .search-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    height: 2rem;
+    padding: 0 0.55rem;
+    color: var(--ink-soft);
+    background: transparent;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: color 0.15s var(--ease-out), border-color 0.15s var(--ease-out);
+  }
+  .search-btn:hover { color: var(--accent-ink); border-color: var(--accent); }
+  .search-btn svg { fill: none; stroke: currentColor; stroke-width: 1.8; display: block; }
+  .search-kbd {
+    font-family: var(--font-mono);
+    font-size: 0.62rem;
+    letter-spacing: 0.06em;
+    color: var(--ink-faint);
+  }
+  @media (max-width: 40rem) { .search-kbd { display: none; } }
+
+  .search-dialog {
+    width: min(38rem, calc(100vw - 2rem));
+    margin: 10vh auto auto;
+    padding: 0;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius);
+    background: var(--paper);
+    color: var(--ink);
+    box-shadow: 0 18px 50px -12px oklch(20% 0.02 255 / 0.35);
+  }
+  .search-dialog::backdrop {
+    background: oklch(20% 0.02 255 / 0.45);
+    backdrop-filter: blur(2px);
+  }
+
+  .search-row {
+    display: flex;
+    align-items: center;
+    gap: 0.7rem;
+    padding: 0.85rem 1rem;
+    border-bottom: 1px solid var(--line);
+    color: var(--ink-faint);
+  }
+  .search-row svg { fill: none; stroke: currentColor; stroke-width: 1.8; flex: 0 0 auto; }
+  #search-input {
+    flex: 1;
+    min-width: 0;
+    font-family: var(--font-body);
+    font-size: 1.05rem;
+    color: var(--ink);
+    background: transparent;
+    border: none;
+    outline: none;
+  }
+  #search-input::placeholder { color: var(--ink-faint); }
+  .search-esc {
+    font-family: var(--font-mono);
+    font-size: 0.62rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    background: transparent;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius-sm);
+    padding: 0.2rem 0.4rem;
+    cursor: pointer;
+  }
+  .search-esc:hover { color: var(--accent-ink); border-color: var(--accent); }
+
+  .search-results {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    max-height: min(22rem, 55vh);
+    overflow-y: auto;
+  }
+  .search-results li { border-bottom: 1px solid var(--line); }
+  .search-results li:last-child { border-bottom: none; }
+  .search-results a {
+    display: block;
+    padding: 0.8rem 1rem;
+    text-decoration: none;
+    color: inherit;
+  }
+  .search-results li:hover a, .search-results li.active a { background: var(--paper-raised); }
+  .r-title {
+    display: block;
+    font-family: var(--font-display);
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    font-size: 1rem;
+    color: var(--ink);
+    margin-bottom: 0.2rem;
+  }
+  .r-excerpt { display: block; font-size: 0.86rem; line-height: 1.5; color: var(--ink-soft); }
+  .r-excerpt :global(mark) { background: var(--accent-wash); color: var(--accent-ink); }
+
+  .search-status {
+    margin: 0;
+    padding: 0.6rem 1rem;
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.08em;
+    color: var(--ink-faint);
+    border-top: 1px solid var(--line);
+  }
+  .search-status:empty { display: none; }
+</style>

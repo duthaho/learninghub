@@ -9,11 +9,20 @@ updated: 2026-11-24
 order: 54
 series: "MongoDB"
 part: 3
+recall:
+  - q: "In a 3-node set plus a `votes:0` delayed secondary, how many acks does `w:\"majority\"` need?"
+    a: "Still 2 — majority is computed over voting members (primary + 1 voting secondary). Non-voting members are irrelevant to write-concern satisfaction."
+  - q: "What can happen to a `w:1` write after a failover?"
+    a: "It can be rolled back: the primary acked it, died before replication, and the new primary never had it. Acked-but-not-majority writes are promises you can't always cash."
+  - q: "When is `linearizable` read concern actually warranted?"
+    a: "Distributed-lock-style reads where you must see the absolute latest state. For profiles and order history, `majority` is sufficient and far cheaper."
+  - q: "What do `w:\"majority\"` + `readConcern: \"majority\"` buy together?"
+    a: "Read-your-committed-writes across failover: a majority-acked write can't be rolled back, and a majority read won't show data that could be."
 ---
 
 import Callout from '../../components/Callout.astro';
 
-*MongoDB deep-dive · Part 3 of 10. Previous: [Reading execution plans](/mongodb-02-execution-plans/). Next: [Replica sets & elections](/mongodb-04-replica-sets/).*
+*MongoDB deep-dive · Part 3 of 11. Previous: [Reading execution plans](/mongodb-02-execution-plans/). Next: [Replica sets & elections](/mongodb-04-replica-sets/).*
 
 MongoDB is a distributed database that runs on commodity hardware that fails.
 Write concerns and read concerns are the knobs that let you decide how much you

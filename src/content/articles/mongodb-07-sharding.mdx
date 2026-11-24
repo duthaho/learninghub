@@ -9,11 +9,20 @@ updated: 2026-11-24
 order: 58
 series: "MongoDB"
 part: 7
+recall:
+  - q: "Why is a shard key 'a decision you live with forever'?"
+    a: "It fixes how data and load distribute across shards; a bad one yields hot spots or scatter-gather forever, and resharding is an expensive, rare operation."
+  - q: "What does the compound key `{device_id: \"hashed\", ts: 1}` buy an IoT workload?"
+    a: "Even write distribution (hashed device ids kill the hot shard) plus efficient per-device time-range queries (ranged ts within the routed shard). Cost: cross-device time queries scatter-gather."
+  - q: "Why is a jumbo chunk a schema problem, not a config problem?"
+    a: "Clearing the flag just retries migration; if too many documents share one shard-key value, it comes back. The fix is a higher-cardinality shard key."
+  - q: "What makes a monotonically increasing shard key (like a timestamp) dangerous?"
+    a: "All inserts land on the chunk at the top of the range — one shard takes every write while the rest idle. Horizontal scale becomes a horizontal hot spot."
 ---
 
 import Callout from '../../components/Callout.astro';
 
-*MongoDB deep-dive · Part 7 of 10. Previous: [Aggregation pipeline](/mongodb-06-aggregation/). Next: [Change streams & oplog tailing](/mongodb-08-change-streams/).*
+*MongoDB deep-dive · Part 7 of 11. Previous: [Aggregation pipeline](/mongodb-06-aggregation/). Next: [Change streams & oplog tailing](/mongodb-08-change-streams/).*
 
 Sharding horizontally partitions a collection across multiple replica sets
 (called **shards**). Each shard holds a subset of the data; together they

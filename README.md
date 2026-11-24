@@ -20,9 +20,13 @@ one accent colour per topic, light + dark themes.
 ```bash
 npm install        # install dependencies
 npm run dev        # local dev server at http://localhost:4321
-npm run build      # static build into dist/
+npm run build      # static build into dist/ + Pagefind search index
 npm run preview    # preview the production build
 ```
+
+Search (⌘K) is powered by [Pagefind](https://pagefind.app); the index is built
+after `astro build`, so search only works against a production build
+(`npm run build && npm run preview`), not in `astro dev`.
 
 ## Adding a topic
 
@@ -41,6 +45,16 @@ npm run preview    # preview the production build
 
    Types: `gotcha` (a real review-queue miss), `insight` (the "aha"), `note`.
 4. It appears on the homepage automatically, ordered by `order`.
+5. Optionally add `recall` cards to the frontmatter — question/answer pairs
+   rendered as a "Before you go" active-recall block at the end of the article
+   and aggregated into the `/review` spaced-repetition queue (progress lives
+   in the reader's `localStorage`):
+
+   ```yaml
+   recall:
+     - q: "The question, asked from memory first. `code` spans allowed."
+       a: "The answer worth keeping."
+   ```
 
 Set `draft: true` in frontmatter to keep a work-in-progress article out of the
 production build.
@@ -51,11 +65,12 @@ production build.
 src/
   content/
     articles/          # the deep-dives (.mdx)
-  components/          # Header, Footer, Callout
+  components/          # Header, Footer, Callout, Recall, Search
   layouts/             # BaseLayout, ArticleLayout
   pages/
     index.astro        # homepage
     about.astro
+    review.astro       # spaced-repetition queue over all recall cards
     [...slug].astro    # renders each article
   styles/global.css    # the design system
 ```

@@ -9,11 +9,20 @@ updated: 2026-08-18
 order: 21
 series: "MySQL"
 part: 3
+recall:
+  - q: "What single fact explains both what an index does well and what it costs?"
+    a: "Entries are kept sorted. Sorted order gives seeks, ranges, and ordered reads; keeping it sorted taxes every write with page maintenance."
+  - q: "Are `INDEX(a, b)` and `INDEX(b, a)` interchangeable?"
+    a: "No — they're different indexes serving different queries. Each serves filters on its leftmost column(s); neither helps a bare query on its second column."
+  - q: "You have `INDEX(a, b, c)`. Is a separate `INDEX(a)` useful? `INDEX(b)`?"
+    a: "`INDEX(a)` is redundant — `a` is a leftmost prefix of the composite. `INDEX(b)` is not redundant: `b` isn't a leftmost prefix, so a bare `WHERE b = ?` gets no help from the composite."
+  - q: "Why can `INDEX(status)` cover `SELECT id ... WHERE status = ?`?"
+    a: "Every secondary-index leaf already stores the PK as its back-pointer, so PK columns are always available for covering even when not declared in the index."
 ---
 
 import Callout from '../../components/Callout.astro';
 
-*MySQL deep-dive · Part 3 of 9. Next: [Reading EXPLAIN](/mysql-04-reading-explain/).*
+*MySQL deep-dive · Part 3 of 10. Next: [Reading EXPLAIN](/mysql-04-reading-explain/).*
 
 Most people treat indexes as a dial you turn when a query gets slow: add one, the
 query speeds up, done. That works often enough to be dangerous, because it hides

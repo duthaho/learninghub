@@ -9,11 +9,22 @@ updated: 2026-08-18
 order: 25
 series: "MySQL"
 part: 7
+recall:
+  - q: "How many row locks does a plain `SELECT ... WHERE id = 1` take?"
+    a: "Zero. It reads the MVCC snapshot, neither blocking writers nor blocked by them. Locks appear only on writes or explicit `FOR UPDATE` / `FOR SHARE`."
+  - q: "Why can an unindexed WHERE on an UPDATE/DELETE lock a whole table?"
+    a: "InnoDB locks every row it scans and only releases those proven non-matching after inspection. An unindexed bulk DELETE scans — and locks — everything."
+  - q: "Error 1213 vs 1205 — what's the difference in diagnosis?"
+    a: "1213 (deadlock) = a real cycle; victim rolled back instantly; fix lock ordering. 1205 (lock wait timeout) = no cycle, just waiting too long behind a long-held lock; shorten the holder."
+  - q: "What does READ COMMITTED change about locking?"
+    a: "Gap locks are largely disabled — only matching rows get record locks. More concurrency, fewer deadlocks, but phantoms return. A deliberate lever for high-contention writes."
+  - q: "A deadlock occurred in production. What's the actual bug?"
+    a: "Usually the missing retry. Deadlocks are normal in lock-based systems; code treating COMMIT as infallible silently drops work. Consistent ordering reduces them; retry handles the rest."
 ---
 
 import Callout from '../../components/Callout.astro';
 
-*MySQL deep-dive · Part 7 of 9. Next: [Schema changes without downtime](/mysql-08-schema-changes/).*
+*MySQL deep-dive · Part 7 of 10. Next: [Schema changes without downtime](/mysql-08-schema-changes/).*
 
 In [Part 6](/mysql-06-transactions-and-isolation/) you saw that isolation is
 half illusion: plain `SELECT`s read from an **MVCC snapshot**, a consistent

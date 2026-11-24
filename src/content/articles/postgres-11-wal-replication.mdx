@@ -9,6 +9,17 @@ updated: 2026-09-07
 order: 61
 series: "Postgres"
 part: 11
+recall:
+  - q: "What is the WAL's core contract?"
+    a: "Every change is logged to WAL before the data page is written. Crash recovery replays WAL from the last checkpoint; the same stream feeds replication."
+  - q: "Streaming vs logical replication — the one-line difference?"
+    a: "Streaming ships physical WAL bytes: whole cluster, same major version, read-only standby. Logical decodes row changes: selected tables, cross-version, writable target."
+  - q: "Can you do a major-version upgrade by promoting a streaming replica?"
+    a: "No — streaming is version-locked. The paths are logical replication into the new version, or `pg_upgrade` with downtime. Promotion changes the role, not the version."
+  - q: "What's the classic replication-slot failure mode?"
+    a: "A slot retains WAL until its consumer confirms receipt. A dead or stalled consumer pins WAL forever — disk fills on the primary. Monitor slot lag."
+  - q: "Why do ORM prepared statements break under PgBouncer transaction mode?"
+    a: "Each transaction may land on a different backend, which never saw the PREPARE — 'prepared statement does not exist' errors appear under load. Disable statement caching or use session mode."
 ---
 
 import Callout from '../../components/Callout.astro';

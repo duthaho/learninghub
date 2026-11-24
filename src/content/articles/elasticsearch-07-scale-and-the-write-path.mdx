@@ -9,11 +9,20 @@ updated: 2026-07-30
 order: 16
 series: "Elasticsearch"
 part: 7
+recall:
+  - q: "Which shard setting is carved in stone, and why?"
+    a: "`number_of_shards` (primaries) — routing is `hash(_id) % primaries`; changing the divisor would strand every document on the wrong shard. Replicas, by contrast, are a live dial."
+  - q: "Why does 'more shards = faster' backfire?"
+    a: "Each shard is a full Lucene index with fixed heap/file-handle overhead, and every search fans out to all shards then merges. Over-sharding exhausts heap and slows queries — aim for tens of GB per shard."
+  - q: "Mechanically, what is 'near real-time'?"
+    a: "Indexed documents sit in an in-memory buffer until a `refresh` (default every 1s) opens a new searchable segment. Durability comes separately from the translog; visibility waits for the refresh."
+  - q: "What happens on a search against a multi-shard index?"
+    a: "Scatter-gather: the coordinating node fans the query to one copy of every shard, each returns its top hits, and the coordinator merges and re-ranks."
 ---
 
 import Callout from '../../components/Callout.astro';
 
-*Elasticsearch deep-dive · Part 7 of 8. Previous: [Aggregations: the analytics engine](/elasticsearch-06-aggregations/) · Next: [When to reach for Elasticsearch](/elasticsearch-08-design-decisions/).*
+*Elasticsearch deep-dive · Part 7 of 9. Previous: [Aggregations: the analytics engine](/elasticsearch-06-aggregations/) · Next: [When to reach for Elasticsearch](/elasticsearch-08-design-decisions/).*
 
 Everything in this series so far has quietly run on **one index**, and you've been picturing it as a single thing sitting on a single machine. That picture is fine for learning queries and mappings. It falls apart the moment someone asks the two questions that actually decide whether Elasticsearch stays up in production: how does one index hold **a billion documents** when no single machine has the RAM or disk for it — and what happens when one of those machines simply **dies** at 3am?
 

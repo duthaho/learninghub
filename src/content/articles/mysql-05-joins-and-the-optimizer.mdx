@@ -9,11 +9,20 @@ updated: 2026-08-18
 order: 23
 series: "MySQL"
 part: 5
+recall:
+  - q: "In a nested-loop join, which table's join column must be indexed?"
+    a: "The inner (probed) table's — it's looked up once per driving row. Indexing the driving table's join column does nothing; that side is read sequentially."
+  - q: "Does being a join column mean it's automatically indexed?"
+    a: "Only if a foreign key constraint exists (InnoDB requires and auto-creates that index). A plain join column with no FK gets nothing — MySQL will full-scan the inner table forever. Check."
+  - q: "When should you let the hash join scan instead of adding an index?"
+    a: "When most of the inner table is needed anyway. The signal is selectivity — how many driving rows survive the filter and whether each wants one row or a big slice — not table size."
+  - q: "What decides which table drives the join?"
+    a: "The optimizer picks the order it estimates cheapest — usually the side that, after filters, yields fewest driving rows. Your indexes and stats shape that choice."
 ---
 
 import Callout from '../../components/Callout.astro';
 
-*MySQL deep-dive · Part 5 of 9. Next: [Transactions and isolation levels](/mysql-06-transactions-and-isolation/).*
+*MySQL deep-dive · Part 5 of 10. Next: [Transactions and isolation levels](/mysql-06-transactions-and-isolation/).*
 
 The word "join" makes it sound like MySQL fuses two tables into one in some clever
 set-theoretic move. It doesn't. Underneath, a join is one of two very ordinary

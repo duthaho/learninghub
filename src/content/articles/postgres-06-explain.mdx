@@ -9,6 +9,17 @@ updated: 2026-09-07
 order: 56
 series: "Postgres"
 part: 6
+recall:
+  - q: "Does `cost=5000` mean five seconds?"
+    a: "No. Cost is unitless (~1.0 = one sequential page read) and only comparable within a single plan tree. Never compare costs across different queries."
+  - q: "A Sort node shows actual time 500ms; its child shows 499ms. Where did the time go?"
+    a: "Into the child. `actual time` is inclusive of children — subtract child from parent to localize; the sort itself did ~1ms."
+  - q: "What's the first number to check when diagnosing a bad plan?"
+    a: "Estimated rows vs actual rows per node. An order-of-magnitude mismatch is the wrong number that every downstream join/scan choice was built on."
+  - q: "Why does a GIN index always show up as a Bitmap Index Scan?"
+    a: "GIN collects matching TIDs across posting lists into a bitmap and hands it to a Bitmap Heap Scan — it never produces a plain Index Scan."
+  - q: "What does adding BUFFERS to EXPLAIN ANALYZE reveal?"
+    a: "Per-node shared `hit` vs `read` counts — whether pages came from cache or disk. It's the I/O truth behind a node's timing."
 ---
 
 import Callout from '../../components/Callout.astro';

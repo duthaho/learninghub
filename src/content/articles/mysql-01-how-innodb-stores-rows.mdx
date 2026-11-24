@@ -9,11 +9,22 @@ updated: 2026-08-18
 order: 19
 series: "MySQL"
 part: 1
+recall:
+  - q: "What does 'the table IS the primary-key index' mean in InnoDB?"
+    a: "Rows live in the leaves of a B-tree ordered by primary key — physically adjacent on disk. There is no separate table structure; the clustered index is the table."
+  - q: "What happens if you create an InnoDB table with no primary key?"
+    a: "InnoDB invents a hidden 6-byte row id to cluster on — it needs something to define physical order. You lose control of the one ordering decision that matters."
+  - q: "What does a secondary-index leaf store, and what follows from it?"
+    a: "The primary-key value, not a row address. Every secondary lookup pays a second B-tree descent (bookmark lookup), and a fat PK is physically copied into every secondary index."
+  - q: "Why does a covering index make a query faster?"
+    a: "It doesn't speed the lookup up — it deletes the second lookup entirely. If every needed column is in the secondary index, the clustered index is never visited."
+  - q: "Are UUIDs bad for MySQL?"
+    a: "The myth conflates two real problems: randomness (page splits, cache misses) and size (36-byte text in every index). `UUIDv7` in `BINARY(16)` has neither; `UUIDv4` in `CHAR(36)` has both."
 ---
 
 import Callout from '../../components/Callout.astro';
 
-*MySQL deep-dive · Part 1 of 9. Next: [Data types as a design decision](/mysql-02-data-types/).*
+*MySQL deep-dive · Part 1 of 10. Next: [Data types as a design decision](/mysql-02-data-types/).*
 
 Most people picture a database table as a spreadsheet: rows sitting in a heap
 somewhere on disk, and indexes as separate little lookup books off to the side

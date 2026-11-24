@@ -9,6 +9,15 @@ updated: 2026-08-13
 order: 6
 series: "Redis"
 part: 5
+recall:
+  - q: "After writing the database, do you `SET` the new value into the cache or `DEL` the key?"
+    a: "DEL. Invalidation is idempotent and order-independent; SET races concurrent writers into storing stale data until TTL. Let reads repopulate lazily."
+  - q: "What's the goal of caching discipline, if not perfect freshness?"
+    a: "Bounded staleness without stampedes: write DB → invalidate → lazy repopulate, with TTL + jitter as the safety net."
+  - q: "How does a cache stampede happen, and what are the defenses?"
+    a: "A hot key expires and every request recomputes at once. Defenses: TTL jitter, a recompute lock (one rebuilder, others wait/serve stale), or early recomputation."
+  - q: "Which strategy keeps a hot value literally never absent?"
+    a: "Early recomputation — refresh before expiry. A recompute lock still has a brief absent window while the holder rebuilds."
 ---
 
 import Callout from '../../components/Callout.astro';

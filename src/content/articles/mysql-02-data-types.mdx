@@ -9,11 +9,22 @@ updated: 2026-08-18
 order: 20
 series: "MySQL"
 part: 2
+recall:
+  - q: "Why are column types 'the first performance decision'?"
+    a: "They fix row width on day one — rows per page, data in RAM — and changing them later on a live multi-million-row table is painful. Tight types are the cheapest tuning you'll ever do."
+  - q: "When is FLOAT the right choice, and when is it a bug?"
+    a: "Right for genuinely approximate values (sensor data, coordinates, scores). A bug for anything summed, compared for equality, or shown to an accountant — that's `DECIMAL`."
+  - q: "What did the 11 in `INT(11)` ever control?"
+    a: "Only display padding for some clients — never range, never storage. It's deprecated in 8.x; range comes from the type itself."
+  - q: "Why does `VARCHAR(1000)` hurt even when values are short?"
+    a: "In-memory temp tables for sorts/GROUP BY often allocate the full declared width — fat temp tables or disk spills — and the declared length inflates any index on the column."
+  - q: "Why is `TIMESTAMP` a latent bug for future dates?"
+    a: "It can't hold values past 2038 — a 20-year expiry fails to store today, not in 2038. Columns that can carry far-future dates should be `DATETIME`."
 ---
 
 import Callout from '../../components/Callout.astro';
 
-*MySQL deep-dive · Part 2 of 9. Next: [Indexes and the B-tree](/mysql-03-indexes-and-the-b-tree/).*
+*MySQL deep-dive · Part 2 of 10. Next: [Indexes and the B-tree](/mysql-03-indexes-and-the-b-tree/).*
 
 Picking a column type feels like paperwork. You need to store a price, so you
 reach for a number; you need a name, so you reach for `VARCHAR(255)` because

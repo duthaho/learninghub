@@ -9,6 +9,17 @@ updated: 2026-09-07
 order: 59
 series: "Postgres"
 part: 9
+recall:
+  - q: "`json` vs `jsonb` — what's the real difference?"
+    a: "`json` stores the text verbatim (key order, duplicates, whitespace preserved) and must be reparsed per access. `jsonb` is parsed binary: indexable, supports containment — the default choice."
+  - q: "Which operator filters rows whose document contains `{\"status\": \"pending\"}`?"
+    a: "Containment: `payload @> '{\"status\":\"pending\"}'` — and GIN can serve it. `->` is navigation (extracts a key), not a filter."
+  - q: "Default `jsonb_ops` vs `jsonb_path_ops` GIN — trade-off?"
+    a: "`jsonb_ops` indexes keys and values separately: bigger, supports existence (`?`) too. `jsonb_path_ops` hashes whole paths: smaller and faster, but only supports `@>`."
+  - q: "Why is a hot counter inside a jsonb column a bloat generator?"
+    a: "Every bump rewrites the entire jsonb value as a new heap tuple and fans out to every index on the table — never HOT. Promote hot counters to real columns."
+  - q: "Which jsonb queries does the GIN index not help?"
+    a: "Range comparisons on extracted values (e.g. `(payload->>'amount')::numeric > 100`). Those need an expression B-tree index; GIN serves containment/existence."
 ---
 
 import Callout from '../../components/Callout.astro';

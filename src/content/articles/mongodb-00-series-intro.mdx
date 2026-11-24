@@ -1,7 +1,7 @@
 ---
 title: "The MongoDB series: start here"
-subtitle: "Ten deep-dives that build the mental model you need to run, tune, and scale MongoDB in production."
-description: "A guide to the ten-part MongoDB deep-dive series: indexes, execution plans, write concerns, replica sets, read preferences, aggregation, sharding, change streams, backup, and observability."
+subtitle: "Eleven deep-dives that build the mental model you need to run, tune, and scale MongoDB in production."
+description: "A guide to the eleven-part MongoDB deep-dive series: indexes, execution plans, write concerns, replica sets, read preferences, aggregation, sharding, change streams, backup, observability, and WiredTiger internals."
 level: "Production · Series guide"
 accent: "#13AA52"
 readingTime: "4 min read"
@@ -21,7 +21,7 @@ The examples are in Python and PyMongo throughout — not because other stacks
 don't matter, but because concrete code is clearer than pseudo-code, and the
 patterns generalise directly.
 
-## The ten parts
+## The eleven parts
 
 1. **[Indexes deep dive](/mongodb-01-indexes/)** — compound vs single-field, the ESR rule, what a "covered query" actually means, and the Python snippets that make the difference visible in `explain()`.
 
@@ -42,6 +42,8 @@ patterns generalise directly.
 9. **[Backup & point-in-time recovery](/mongodb-09-backup/)** — `mongodump --oplog`, `mongorestore --oplogReplay --oplogLimit`, what logical backup silently misses that a filesystem snapshot captures, and the sharded-cluster caveat.
 
 10. **[Monitoring & security hardening](/mongodb-10-monitoring/)** — the four signals to check when latency spikes, `$currentOp`, the database profiler, WiredTiger cache eviction, and the minimum-privilege RBAC pattern for a Python service.
+
+11. **[Under the hood: WiredTiger storage](/mongodb-11-wiredtiger/)** — B-trees and RecordIds, copy-on-write pages, the 60-second checkpoint plus journal durability model, compression, and document-level concurrency — the machinery every earlier part stands on.
 
 ## How to read it
 

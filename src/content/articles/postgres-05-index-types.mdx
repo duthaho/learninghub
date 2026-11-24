@@ -9,6 +9,17 @@ updated: 2026-09-07
 order: 55
 series: "Postgres"
 part: 5
+recall:
+  - q: "Why doesn't `CREATE INDEX ... USING gin(name)` speed up `ILIKE '%foo%'`?"
+    a: "GIN needs an opclass that decomposes values into elements; bare `text` has none useful. You need `gin (name gin_trgm_ops)` from pg_trgm so trigrams get indexed."
+  - q: "What data shape is BRIN actually for?"
+    a: "Physically ordered data — append-only time-series, log tables. It stores min/max per block range, so it's tiny and fast there, and useless on randomly inserted columns."
+  - q: "What's the optimal index for a job queue (`WHERE state = 'open' ORDER BY created_at LIMIT 1`)?"
+    a: "A partial index: `CREATE INDEX ON jobs (created_at) WHERE state = 'open'`. The WHERE clause prunes ~all closed jobs before the B-tree scan starts."
+  - q: "What must be true for an index-only scan to actually skip the heap?"
+    a: "Every needed column is in the index and the page is marked all-visible in the visibility map. Dirty VM pages force heap fetches — vacuum recency decides whether 'index-only' is real."
+  - q: "What do INCLUDE columns in a B-tree index do?"
+    a: "Carry non-key payload columns in the leaf pages so more queries qualify for index-only scans — without widening the key or affecting sort order."
 ---
 
 import Callout from '../../components/Callout.astro';

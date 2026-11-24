@@ -9,11 +9,20 @@ updated: 2026-11-24
 order: 59
 series: "MongoDB"
 part: 8
+recall:
+  - q: "Save the resume token before or after processing the event?"
+    a: "After. Process-then-save = at-least-once (idempotent processing required, nothing missed). Save-then-process = at-most-once — a crash silently skips an event."
+  - q: "What invalidates a saved resume token?"
+    a: "The oplog rolling past it — if the consumer is down longer than the oplog window covers, resumption fails and you need a full re-sync. Size the oplog for your longest outage."
+  - q: "In PyMongo, what's wrong with `col.watch({\"resume_after\": token})`?"
+    a: "The first positional arg is the aggregation pipeline — the token is silently ignored and the stream starts from now. It must be the keyword: `col.watch(resume_after=token)`."
+  - q: "What ordering guarantee do change streams give?"
+    a: "Cluster-wide total order of majority-committed changes (they read from the oplog) — every mutation, in order, resumable via the token contract."
 ---
 
 import Callout from '../../components/Callout.astro';
 
-*MongoDB deep-dive · Part 8 of 10. Previous: [Sharding architecture](/mongodb-07-sharding/). Next: [Backup & point-in-time recovery](/mongodb-09-backup/).*
+*MongoDB deep-dive · Part 8 of 11. Previous: [Sharding architecture](/mongodb-07-sharding/). Next: [Backup & point-in-time recovery](/mongodb-09-backup/).*
 
 Change streams give your application a real-time feed of mutations to a
 collection (or database, or entire cluster) without requiring direct oplog

@@ -26,6 +26,12 @@ const articles = defineCollection({
     // cover/guide, not a numbered chapter). Standalone articles omit both.
     series: z.string().optional(),
     part: z.number().optional(),
+    // Active-recall cards: shown as "Check yourself" at the end of the article
+    // and aggregated into the /review spaced-repetition deck. Use backticks in
+    // `q`/`a` for inline code.
+    recall: z
+      .array(z.object({ q: z.string(), a: z.string() }))
+      .optional(),
   }),
 });
 

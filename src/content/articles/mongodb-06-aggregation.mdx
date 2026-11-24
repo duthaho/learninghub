@@ -9,11 +9,20 @@ updated: 2026-11-24
 order: 57
 series: "MongoDB"
 part: 6
+recall:
+  - q: "What's the most common cause of an unexpectedly slow `$lookup`?"
+    a: "No index on the joined collection's `foreignField` — the lookup full-scans it once per input document. Index the foreignField."
+  - q: "`$out` vs `$merge` — when is each correct?"
+    a: "`$out` for from-scratch rebuilds (atomic replace, no orphans). `$merge` for incremental updates (preserves existing records). Swap them and you either delete accumulated data or keep orphans."
+  - q: "Where should `$match` and `$project` sit in a pipeline, and why?"
+    a: "As early as possible — `$match` first can use indexes and shrinks every downstream stage; projecting early cuts the bytes flowing through the assembly line."
+  - q: "What's the design smell in a pipeline stage?"
+    a: "A stage doing everything at once. Each stage should do one transformation; complexity belongs in the sequence, not inside a mega-stage."
 ---
 
 import Callout from '../../components/Callout.astro';
 
-*MongoDB deep-dive · Part 6 of 10. Previous: [Read preferences](/mongodb-05-read-preferences/). Next: [Sharding architecture](/mongodb-07-sharding/).*
+*MongoDB deep-dive · Part 6 of 11. Previous: [Read preferences](/mongodb-05-read-preferences/). Next: [Sharding architecture](/mongodb-07-sharding/).*
 
 MongoDB's aggregation pipeline is a sequence of stages, each of which
 transforms a stream of documents and passes the result to the next. The mental

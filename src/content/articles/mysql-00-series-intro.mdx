@@ -1,7 +1,7 @@
 ---
 title: "The MySQL series: start here"
-subtitle: "Nine short deep-dives that build one mental model of MySQL — from how InnoDB stores a row to the pitfalls that bite from application code."
-description: "A guide to the nine-part MySQL deep-dive series: what each part covers, who it's for, and the order to read them in."
+subtitle: "Ten short deep-dives that build one mental model of MySQL — from how InnoDB stores a row to the binlog that every replica and CDC pipeline hangs off."
+description: "A guide to the ten-part MySQL deep-dive series: what each part covers, who it's for, and the order to read them in."
 level: "Foundations · Series guide"
 accent: "#00758f"
 readingTime: "3 min read"
@@ -28,7 +28,7 @@ Every idea is hooked onto something you already know — an `orders` table, an A
 endpoint, an ORM — and every part ends with the one misconception that trips
 people up in production, not a wall of trivia.
 
-## The nine parts
+## The ten parts
 
 1. **[How InnoDB stores your rows](/mysql-01-how-innodb-stores-rows/)** — the clustered index, why the table is physically ordered by its primary key, and why a random UUID key quietly wrecks write performance.
 2. **[Data types as a design decision](/mysql-02-data-types/)** — `DECIMAL` vs `FLOAT` for money, sizing integers, `VARCHAR`/`CHAR`/`TEXT`, and the `DATETIME`-vs-`TIMESTAMP` (2038) trap — narrower rows, correct results.
@@ -39,6 +39,7 @@ people up in production, not a wall of trivia.
 7. **[Locking and deadlocks](/mysql-07-locking-and-deadlocks/)** — row, gap and next-key locks, `SELECT ... FOR UPDATE`, how a deadlock forms, and the lock-ordering and retry patterns that prevent them.
 8. **[Schema changes without downtime](/mysql-08-schema-changes/)** — foreign-key actions, online DDL (`INSTANT` / `INPLACE` / `COPY`), and how to add a column or index and backfill a large live table without locking it.
 9. **[MySQL from application code](/mysql-09-application-code/)** — connection pooling, the N+1 query, prepared statements, `utf8mb4`, JSON columns, and window functions & CTEs — the pitfalls an ORM hides from you.
+10. **[Replication & the binlog](/mysql-10-replication-and-binlog/)** — the binlog vs the redo log, row vs statement format, GTIDs and failover, semi-sync's fine print, where replica lag really comes from, and the binlog as a CDC feed.
 
 ## How to read it
 
@@ -46,9 +47,10 @@ Parts 1–3 are the foundation — how rows are stored, how to type them, and ho
 indexes work. Don't skip them; the rest leans on them constantly. Parts 4–5 are
 the diagnostic core: reading query plans and understanding joins. Parts 6–7 shift
 from performance to **correctness under concurrency** — transactions and locking,
-the part backend bugs actually live in. Parts 8–9 are the operational and
+the part backend bugs actually live in. Parts 8–10 are the operational and
 application judgment that turn "I can write a query" into "I can evolve a live
-schema and write DB code that survives production."
+schema, write DB code that survives production, and reason about the replicas
+and pipelines hanging off the binlog."
 
 > Everything version-sensitive here was checked against **MySQL 8.4 LTS**
 > (mid-2026); MySQL 8.0 reached end-of-life in April 2026, so 8.4 is the line to

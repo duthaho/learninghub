@@ -1,0 +1,240 @@
+---
+title: "Operating Elasticsearch in production"
+subtitle: "Indices age, heaps fill, and shards multiply — the operating judgment that keeps a cluster healthy after the design decisions are made."
+description: "Running Elasticsearch in production: practical shard sizing, index lifecycle management and rollover, what cluster health colours actually mean, slow logs, circuit breakers and rejected queues, snapshots with SLM, and zero-downtime reindexing behind an alias."
+level: "Advanced · Operations"
+accent: "#be123c"
+readingTime: "14 min read"
+updated: 2026-11-24
+order: 17
+series: "Elasticsearch"
+part: 9
+recall:
+  - q: "What does a yellow cluster actually mean?"
+    a: "Every primary shard is assigned but at least one replica isn't — data is fully available with reduced redundancy. Red means at least one primary is unassigned: some data can't be served. The colours are statements about shard allocation, nothing else."
+  - q: "Why does rollover beat daily indices for time-series data?"
+    a: "Daily indices produce shards sized by the calendar — huge on busy days, tiny on quiet ones. Rollover cuts a new index when the current one hits a size/age threshold (e.g. 50GB or 30 days), so every shard lands in the healthy range regardless of traffic."
+  - q: "What's the practical shard-sizing target, and what are the two failure directions?"
+    a: "Aim for roughly 10–50GB per shard. Too many small shards: fixed per-shard heap/cluster-state overhead strangles the cluster. Too few huge shards: slow recovery and rebalancing, no spread. You size shards by planning indices, because primaries are fixed at creation."
+  - q: "A search returns `es_rejected_execution_exception` — what is the cluster telling you?"
+    a: "A thread-pool queue overflowed — backpressure. The cluster is at capacity for that operation type; the fix is reducing fan-out (fewer shards per query), slowing producers, or adding capacity — not raising the queue size, which just hides the signal in latency."
+  - q: "How do you change a mapping on a live index with zero downtime?"
+    a: "You can't change it in place — mappings are fixed. Point the application at an alias, create a new index with the right mapping, `_reindex` into it, then swap the alias to the new index in one atomic update and delete the old one."
+  - q: "Are replicas a backup?"
+    a: "No — a bad delete, a mapping accident, or corruption replicates to every copy within seconds. Only snapshots (ideally automated with SLM) are a point in time you can return to."
+---
+
+import Callout from '../../components/Callout.astro';
+
+*Elasticsearch deep-dive · Part 9 of 9. Previous: [When to reach for Elasticsearch](/elasticsearch-08-design-decisions/). Back to the [series guide](/elasticsearch-00-series-intro/).*
+
+[Part 8](/elasticsearch-08-design-decisions/) ended with design judgment —
+where Elasticsearch belongs in an architecture. This closing part is the other
+judgment: what it takes to *keep* a cluster healthy once it's there. Unlike a
+database that mostly holds one dataset at a steady size, a search cluster
+accumulates: indices age, logs arrive forever, shards multiply, and the heap —
+not the disk — is usually what fails first.
+
+The operating mental model: **everything you monitor and manage is a
+consequence of the shard arithmetic from [Part 7](/elasticsearch-07-scale-and-the-write-path/).**
+Shards carry fixed overhead; searches fan out to every shard; primaries are
+fixed at creation. Production operations is the art of keeping those three
+facts from compounding against you.
+
+## Shard sizing, with numbers
+
+[Part 7](/elasticsearch-07-scale-and-the-write-path/) made the argument;
+operations needs the numbers. The working targets that have survived a decade
+of postmortems:
+
+- **10–50GB per shard** for most workloads (search-heavy nearer the low end,
+  logs nearer the high end).
+- **Shard count proportional to heap** — as a rule of thumb, stay well under
+  ~20 shards per GB of heap on a node, and treat thousands of shards on a
+  modest cluster as a defect, not a scale story.
+
+Both failure directions are real. Too many small shards: each is a full Lucene
+index paying fixed heap, file-handle, and cluster-state costs, and every
+search fans out to all of them — the cluster chokes on bookkeeping while
+holding little data. Too few huge shards: recovery and rebalancing move
+hundreds of GB per shard, and a single node failure turns into hours of
+copying.
+
+The catch that makes this an *operations* problem: `number_of_shards` is fixed
+at index creation. You don't tune shards — you plan **indices** so the shards
+come out right. For a bounded product catalogue, that's easy: estimate, divide,
+done. For unbounded time-series data, it needs machinery:
+
+## ILM: indices on a conveyor belt
+
+The naive time-series pattern — one index per day — sizes shards by the
+*calendar*: Black Friday produces monster shards, a quiet Sunday produces
+confetti. **Rollover** fixes the sizing: write to an alias, and when the
+current index behind it hits a threshold — `max_primary_shard_size: 50gb` or
+`max_age: 30d` — Elasticsearch cuts a new index and moves the write alias
+forward. Every shard lands in the healthy range, regardless of traffic.
+
+**Index lifecycle management (ILM)** automates the rest of the index's life as
+phases:
+
+```json
+PUT _ilm/policy/logs-policy
+{
+  "policy": {
+    "phases": {
+      "hot":    { "actions": { "rollover": { "max_primary_shard_size": "50gb",
+                                             "max_age": "30d" } } },
+      "warm":   { "min_age": "7d",
+                  "actions": { "forcemerge": { "max_num_segments": 1 },
+                               "allocate": { "number_of_replicas": 1 } } },
+      "cold":   { "min_age": "30d",
+                  "actions": { "allocate": { "require": { "data": "cold" } } } },
+      "delete": { "min_age": "90d", "actions": { "delete": {} } }
+    }
+  }
+}
+```
+
+Hot indices take writes on fast nodes; warm indices are read-only, force-merged
+to one segment ([Part 7](/elasticsearch-07-scale-and-the-write-path/)'s segment
+arithmetic: fewer segments, cheaper searches) and shifted to cheaper hardware;
+delete finally pays down the retention promise. The pattern to internalize:
+**retention is `DROP INDEX`, never delete-by-query** — the same lesson as
+[Postgres's partition dropping](/postgres-10-migrations/): removing a whole
+unit of storage is instant, removing rows from inside one is a slow I/O storm.
+
+## What the health colours actually say
+
+`GET _cluster/health` returns green, yellow, or red — and the colours are
+precise statements about **shard allocation**, nothing more:
+
+- **Green** — every primary and every replica is assigned.
+- **Yellow** — every *primary* is assigned; at least one *replica* isn't. All
+  data is available; redundancy is reduced. (A single-node cluster with
+  default `number_of_replicas: 1` is *permanently yellow* — there's no second
+  node to hold the replicas. That's a configuration fact, not a warning.)
+- **Red** — at least one primary is unassigned. Some portion of the data can't
+  be read or written. Searches against the index still answer — *partially* —
+  which is its own trap: a red cluster degrades results before it throws
+  errors.
+
+When a shard won't assign, don't guess:
+
+```json
+GET _cluster/allocation/explain
+```
+
+names the shard and the exact reason each node declined it — disk watermark
+exceeded, allocation filtering, too many retries after a failure. It's the
+single most underused diagnostic API in the product.
+
+## Slow logs: finding the query that hurts
+
+The cluster-level view says *that* things are slow; per-index **slow logs**
+say *what*. Thresholds are off by default — turning them on is usually the
+first genuinely useful observability step:
+
+```json
+PUT products/_settings
+{
+  "index.search.slowlog.threshold.query.warn": "2s",
+  "index.search.slowlog.threshold.query.info": "500ms",
+  "index.indexing.slowlog.threshold.index.warn": "1s"
+}
+```
+
+Each entry records the shard, the took-time, and the full query source — which
+is typically all you need to recognise an unbounded wildcard, a
+10,000-bucket aggregation, or a deep-pagination scroll some client shipped
+last Tuesday. For a single suspicious query, the **Profile API**
+(`"profile": true` in the search body) breaks time down per Lucene component —
+the [query-context vs filter-context](/elasticsearch-04-query-dsl/) decisions
+from Part 4 become visible as real milliseconds.
+
+## Memory pressure: breakers and rejections
+
+The two signals that predict an Elasticsearch outage are both backpressure
+mechanisms doing their job:
+
+**Circuit breakers** (`circuit_breaking_exception`) abort a request that would
+push heap usage past a limit — the parent breaker trips near ~95% of real heap
+usage. Scattered trips under a spike are the system protecting itself;
+*steady* trips mean the steady-state workload no longer fits the heap: too
+many shards, oversized aggregations, or a fielddata-hungry pattern like
+aggregating on `text` ([Part 6](/elasticsearch-06-aggregations/) told you to
+use `keyword`; the breaker is what fires when someone doesn't).
+
+**Queue rejections** (`es_rejected_execution_exception`) mean a thread-pool
+queue — search or write — overflowed. The arithmetic is Part 7's fan-out: one
+logical search = one task *per shard it touches*, so a query over 500 shards
+can fill a search queue with a handful of concurrent requests. The honest
+fixes are fewer shards per query (ILM tiers, better index targeting), slower
+producers (smaller bulk concurrency), or more capacity.
+
+<Callout type="gotcha" title="Raising the queue size is almost never the fix">
+A rejection is the cluster telling you "I can't keep up." Doubling
+`thread_pool.search.queue_size` doesn't add capacity — it converts a fast,
+visible error into silently growing latency while requests rot in the queue,
+and raises heap pressure for the privilege. Treat rejections like a full
+restaurant: add tables or spread out reservations — don't make the waiting
+line longer and call it solved.
+</Callout>
+
+## Snapshots: replicas are not backups
+
+Replicas protect against *hardware* failure. They replicate a bad
+delete-by-query, a mapping accident, or an index corruption to every copy
+within seconds. The only point in time you can *return* to is a **snapshot**:
+incremental at the segment level (immutable segments — [Part 7](/elasticsearch-07-scale-and-the-write-path/)
+again — make this cheap), stored in a repository (S3, GCS, shared FS), and
+automated with **snapshot lifecycle management** so it isn't a human's
+memory:
+
+```json
+PUT _slm/policy/nightly
+{
+  "schedule": "0 30 2 * * ?",
+  "name": "<nightly-{now/d}>",
+  "repository": "s3-backups",
+  "retention": { "expire_after": "30d", "min_count": 7 }
+}
+```
+
+And the rule that every backup chapter in this hub repeats
+([MongoDB's](/mongodb-09-backup/) said it verbatim): an untested restore is a
+hope, not a strategy. Restore into a scratch cluster on a schedule.
+
+## Changing your mind: reindex behind an alias
+
+[Part 2](/elasticsearch-02-documents-and-mappings/) established that a mapped
+field's type is fixed for the life of the index. Production needs a way to be
+wrong anyway. The pattern:
+
+1. Applications read and write through an **alias**, never a concrete index
+   name. (Decide this on day one; it costs nothing.)
+2. Create `products_v2` with the corrected mapping.
+3. `POST _reindex` from `products_v1` to `products_v2` (throttled with
+   `requests_per_second`; it's a scan-and-bulk-index under the hood).
+4. Swap atomically, then clean up:
+
+```json
+POST _aliases
+{
+  "actions": [
+    { "remove": { "index": "products_v1", "alias": "products" } },
+    { "add":    { "index": "products_v2", "alias": "products" } }
+  ]
+}
+```
+
+No client ever sees a missing index, and the swap is one cluster-state update.
+This is the operational escape hatch for every "carved in stone" in the
+series — mappings, analyzers, primary shard counts: all fixed per index, all
+changeable by *replacing* the index behind the curtain.
+
+---
+
+That closes the series: the inverted index explained what Elasticsearch *is*
+([Part 1](/elasticsearch-01-mental-model/)), Parts 2–6 how to speak to it,
+Parts 7–8 how it scales and where it belongs — and this part, how to still be
+friends with it a year into production.

@@ -9,6 +9,17 @@ updated: 2026-09-07
 order: 52
 series: "Postgres"
 part: 2
+recall:
+  - q: "Where does Postgres keep old row versions, and how does that differ from InnoDB?"
+    a: "In the heap itself — every version is a full physical tuple in the table. InnoDB updates rows in place and keeps old versions in a separate undo log."
+  - q: "What do the hidden columns `xmin` and `xmax` record on every tuple?"
+    a: "`xmin` is the XID of the transaction that created the tuple; `xmax` is the XID that deleted or superseded it (0 = still live). Readers compare them against their snapshot to decide visibility."
+  - q: "Why is `UPDATE` in Postgres roughly as expensive as `DELETE` + `INSERT`?"
+    a: "An UPDATE never modifies a row in place — it writes a complete new tuple into the heap and marks the old one's `xmax`. Both versions sit in the table until VACUUM reclaims the dead one."
+  - q: "Why are rollbacks nearly instant in Postgres?"
+    a: "Nothing is undone physically: the transaction is just marked aborted in the clog, and every reader thereafter treats tuples with that `xmin` as invisible."
+  - q: "What is a tuple's `ctid`, and what happens to it on UPDATE?"
+    a: "Its physical address, `(page, line_offset)`. The old tuple stays at its ctid but is dead; the new version gets a new ctid — nothing moves in place."
 ---
 
 import Callout from '../../components/Callout.astro';

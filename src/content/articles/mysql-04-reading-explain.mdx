@@ -9,11 +9,20 @@ updated: 2026-08-18
 order: 22
 series: "MySQL"
 part: 4
+recall:
+  - q: "Which two EXPLAIN columns do you read first, and why?"
+    a: "`type` (the shape of access) and `key` (which index enabled it). `type: ALL` with `key: NULL` already tells the whole story: full table walk, no index."
+  - q: "Is `rows` in EXPLAIN the number of rows the query returns?"
+    a: "No — it's a per-step optimizer estimate of rows examined, drawn from statistics. After bulk loads/deletes it can be wildly stale; `ANALYZE TABLE` refreshes it, `EXPLAIN ANALYZE` shows estimate vs actual."
+  - q: "What does `Using filesort` actually mean?"
+    a: "MySQL must sort result rows itself instead of reading them in index order — not necessarily a file on disk, but work an index matching the ORDER BY shape could eliminate."
+  - q: "What's the single-table diagnostic loop?"
+    a: "Spot trouble (`type: ALL`, unexpected filesort/temporary) → add an index matching the filter-then-sort shape → confirm `ref`/`range`, filesort gone, ideally `Using index`."
 ---
 
 import Callout from '../../components/Callout.astro';
 
-*MySQL deep-dive · Part 4 of 9. Next: [JOINs and the optimizer](/mysql-05-joins-and-the-optimizer/).*
+*MySQL deep-dive · Part 4 of 10. Next: [JOINs and the optimizer](/mysql-05-joins-and-the-optimizer/).*
 
 In [Part 3](/mysql-03-indexes-and-the-b-tree/) you learned what an index *is* — a sorted B-tree
 that lets MySQL find rows without reading every one. That's the theory. `EXPLAIN`

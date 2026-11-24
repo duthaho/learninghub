@@ -9,6 +9,15 @@ updated: 2026-08-13
 order: 4
 series: "Redis"
 part: 3
+recall:
+  - q: "A key's TTL passed but memory didn't drop. Broken?"
+    a: "No — expiry is logically immediate (reads treat it as absent) but memory is reclaimed lazily: on next access or when the active sampler finds it. Correctness now, reclamation eventually."
+  - q: "What is the default `maxmemory-policy`, and when is it a bug?"
+    a: "`noeviction` — at the memory ceiling, writes fail with OOM while reads work. Safe for a system of record; a bug for a cache, where you wanted cold data thrown away."
+  - q: "Expiry vs eviction — what's the one-line distinction?"
+    a: "Expiry is a deadline you set per key; eviction is a bouncer at a full room. Independent clocks: a key can be evicted before its TTL, and a no-TTL key can still be evicted under `allkeys-*`."
+  - q: "Which eviction policy for a pure cache, and why?"
+    a: "`allkeys-lru` (or `allkeys-lfu`): any cold key may be discarded, TTL or not. `volatile-*` policies only consider keys with TTLs — and fail like noeviction when none qualify."
 ---
 
 import Callout from '../../components/Callout.astro';

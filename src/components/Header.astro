@@ -1,8 +1,11 @@
 ---
+import Search from './Search.astro';
+
 const base = import.meta.env.BASE_URL;
 const path = Astro.url.pathname;
 const repo = 'https://github.com/duthaho/learninghub';
 const onAbout = path.startsWith(`${base}about`);
+const onReview = path.startsWith(`${base}review`);
 ---
 
 <header class="masthead">
@@ -17,8 +20,10 @@ const onAbout = path.startsWith(`${base}about`);
 
     <nav class="nav" aria-label="Primary">
       <a class="lnk" href={`${base}#map`}>Map</a>
+      <a class="lnk" class:list={[{ active: onReview }]} href={`${base}review/`}>Review</a>
       <a class="lnk" class:list={[{ active: onAbout }]} href={`${base}about/`}>About</a>
       <a class="lnk" href={repo} target="_blank" rel="noopener noreferrer">GitHub</a>
+      <Search />
       <button id="theme-toggle" class="toggle" type="button" aria-label="Toggle colour theme" title="Toggle light / dark">
         <svg class="i-sun" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="12" cy="12" r="4.2" fill="currentColor" stroke="none"/><g stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><line x1="12" y1="2.5" x2="12" y2="5"/><line x1="12" y1="19" x2="12" y2="21.5"/><line x1="2.5" y1="12" x2="5" y2="12"/><line x1="19" y1="12" x2="21.5" y2="12"/><line x1="5.1" y1="5.1" x2="6.8" y2="6.8"/><line x1="17.2" y1="17.2" x2="18.9" y2="18.9"/><line x1="18.9" y1="5.1" x2="17.2" y2="6.8"/><line x1="6.8" y1="17.2" x2="5.1" y2="18.9"/></g></svg>
         <svg class="i-moon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z" fill="currentColor" stroke="none"/></svg>

@@ -9,11 +9,20 @@ updated: 2026-07-30
 order: 10
 series: "Elasticsearch"
 part: 1
+recall:
+  - q: "Why does search come back ranked instead of yes/no?"
+    a: "The inverted index tracks how often and where terms appear across the collection, so every match can be scored. Ranking falls straight out of the data structure — it isn't bolted on."
+  - q: "Why does 'replace Postgres with Elasticsearch' fail quietly?"
+    a: "No transactions for the checkout, refresh lag makes your own writes invisible for a moment, no joins. None are bugs — it's a search engine behaving as designed, not a failed database."
+  - q: "What does an inverted index map, in one line?"
+    a: "Term → list of documents containing it (postings), with frequencies and positions — the inverse of a row-store's document → fields orientation."
+  - q: "What is Elasticsearch structurally bad at?"
+    a: "Being a system of record: atomic multi-document updates, read-after-write consistency, joins/relationships. Keep those in the database it complements."
 ---
 
 import Callout from '../../components/Callout.astro';
 
-*Elasticsearch deep-dive · Part 1 of 8. Next: [Documents, mappings & the shape of your data](/elasticsearch-02-documents-and-mappings/).*
+*Elasticsearch deep-dive · Part 1 of 9. Next: [Documents, mappings & the shape of your data](/elasticsearch-02-documents-and-mappings/).*
 
 Most people meet Elasticsearch as one of two things: "the search box" behind a
 site's search bar, or "a fast JSON store" they can throw documents at. Both are

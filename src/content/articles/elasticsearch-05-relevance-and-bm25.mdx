@@ -9,11 +9,20 @@ updated: 2026-07-30
 order: 14
 series: "Elasticsearch"
 part: 5
+recall:
+  - q: "State the BM25 formula as one sentence of intuitions."
+    a: "Score ≈ term frequency (saturating) × rarity across the index (IDF) ÷ field length. Frequency pushes up but flattens; rare terms multiply; long fields divide back down."
+  - q: "Why is 'only show results with _score > 5.0' a trap?"
+    a: "BM25 scores aren't normalized — they only order results within one query's result set. The same cutoff means something different for every query."
+  - q: "Is a document's score stable over time?"
+    a: "No — IDF is computed against the current index, so the same document + query can score differently as content changes. `_score` is a ranking signal for right now, not a durable grade."
+  - q: "Why does term frequency saturate in BM25?"
+    a: "Diminishing returns: the 20th occurrence of a term says little more than the 5th. Saturation stops keyword-stuffed fields from dominating rankings."
 ---
 
 import Callout from '../../components/Callout.astro';
 
-*Elasticsearch deep-dive · Part 5 of 8. Previous: [The Query DSL](/elasticsearch-04-query-dsl/) · Next: [Aggregations: the analytics engine](/elasticsearch-06-aggregations/).*
+*Elasticsearch deep-dive · Part 5 of 9. Previous: [The Query DSL](/elasticsearch-04-query-dsl/) · Next: [Aggregations: the analytics engine](/elasticsearch-06-aggregations/).*
 
 Part 1 made a claim and then moved on: Elasticsearch returns results **ranked**, not just matched. A SQL `WHERE name LIKE '%keyboard%'` gives you rows that match — in whatever order the database felt like. Elasticsearch gives you rows *sorted by how well they match*, and it attaches a number, the `_score`, to each one.
 

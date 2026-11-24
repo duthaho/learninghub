@@ -9,11 +9,20 @@ updated: 2026-07-30
 order: 13
 series: "Elasticsearch"
 part: 4
+recall:
+  - q: "Why does a `term` query against a `text` field return zero hits?"
+    a: "The field was analyzed into terms at index time, but `term` doesn't analyze your input — `\"Wireless Keyboard\"` as one capitalized term was never stored. Rule: `term` for keyword/numeric, `match` for text."
+  - q: "Query context vs filter context — what question does each ask?"
+    a: "Query: 'how well does it match?' (computes `_score`). Filter: 'does it match, yes/no?' (no scoring, cacheable). Relevance signals go in query context, hard constraints in filter context."
+  - q: "In a `bool` query, what's the difference between `must_not` + `filter` and `must` + `should`?"
+    a: "`filter`/`must_not` are filter context — include/exclude, no score, cacheable. `must`/`should` are query context — they contribute to relevance scoring."
+  - q: "Why bother putting hard constraints in filter context?"
+    a: "No scoring work, and filters are cacheable as bitsets across queries — the fastest and most reusable way to cut the candidate set."
 ---
 
 import Callout from '../../components/Callout.astro';
 
-*Elasticsearch deep-dive · Part 4 of 8. Previous: [How Elasticsearch reads text](/elasticsearch-03-text-analysis/) · Next: [Why results come back ranked: BM25](/elasticsearch-05-relevance-and-bm25/).*
+*Elasticsearch deep-dive · Part 4 of 9. Previous: [How Elasticsearch reads text](/elasticsearch-03-text-analysis/) · Next: [Why results come back ranked: BM25](/elasticsearch-05-relevance-and-bm25/).*
 
 In SQL you ask questions with a `WHERE` clause: a flat string of `AND`s, `OR`s, and comparisons. In Elasticsearch you ask questions with **JSON trees** — a structure called the **Query DSL**, where every node is a query and queries nest inside other queries. If you're building a search box for a `products` catalogue, this is the language you'll live in.
 

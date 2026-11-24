@@ -1,0 +1,239 @@
+---
+title: "Replication & the binlog"
+subtitle: "Every replica, every failover, and every CDC pipeline hangs off one file — and the guarantees you think you have depend on three settings most teams never check."
+description: "MySQL replication explained: the binlog vs the redo log, row vs statement format, GTIDs, semi-synchronous replication, replica lag and parallel appliers, and the binlog as a change-data-capture feed."
+level: "Advanced · Operations"
+accent: "#00758f"
+readingTime: "14 min read"
+updated: 2026-11-24
+order: 28
+series: "MySQL"
+part: 10
+recall:
+  - q: "MySQL has two logs on the write path — what does each one do?"
+    a: "InnoDB's redo log is physical and exists for crash recovery of the local instance. The binlog is a server-level, logical record of committed changes — replication, PITR, and CDC all read it. A write isn't durable *and* replicable until both are flushed, coordinated by an internal two-phase commit."
+  - q: "Why is statement-based replication dangerous, and what replaced it?"
+    a: "Statements like `UPDATE ... LIMIT 1` without ORDER BY, or ones using `NOW()`/`UUID()`, are non-deterministic — replicas can diverge silently. Row-based replication (the default since 5.7) ships the actual row changes instead of the SQL."
+  - q: "What problem do GTIDs solve over file + position coordinates?"
+    a: "A binlog file/offset is only meaningful on one server — after failover, replicas can't find their place on the new primary. A GTID names the transaction itself, globally, so a replica can auto-position against any server that has it."
+  - q: "Does semi-synchronous replication mean the replica has applied your write?"
+    a: "No — the primary waits only for a replica to acknowledge *receiving* the event into its relay log, not applying it. And on timeout it silently degrades to async. It shrinks the data-loss window; it doesn't close it."
+  - q: "Why does `Seconds_Behind_Source` read 0 moments before a replica falls minutes behind?"
+    a: "It measures the delay of the event currently being applied — a single huge transaction arrives as one event, so lag reads ~0 until the replica starts replaying it, then jumps. Monitor GTID gap or heartbeat tables instead; keep transactions small."
+---
+
+import Callout from '../../components/Callout.astro';
+
+*MySQL deep-dive · Part 10 of 10. Previous: [MySQL from application code](/mysql-09-application-code/). Back to the [series guide](/mysql-00-series-intro/).*
+
+Everything in this series so far happened inside one server. But almost no
+production MySQL runs alone: there's a replica for reads, a standby for
+failover, a pipeline feeding the data warehouse, maybe a Debezium connector
+feeding Kafka. Every one of those consumers hangs off a single mechanism — the
+**binary log** — and the guarantees you *think* you have (no lost writes on
+failover, replicas that converge, backups you can roll forward) depend on
+settings most teams have never read.
+
+The mental model for this part: **the binlog is a logical, ordered record of
+every committed change, written by the server; replication is just another
+process reading that record and replaying it elsewhere.** Hold that, and
+replicas, GTIDs, semi-sync, and CDC all become variations on "who reads the
+log, and how far behind are they?"
+
+## Two logs, two jobs
+
+MySQL writes two logs on the write path, and conflating them causes real
+confusion.
+
+The **redo log** belongs to InnoDB. It's *physical* — "page 4,214 changed in
+this way" — and it exists for exactly one purpose: crash recovery of *this*
+instance. After a power cut, InnoDB replays the redo log to bring its pages
+back to the last committed state. The redo log never leaves the machine and is
+useless to any other server.
+
+The **binlog** belongs to the MySQL server layer, above the storage engine.
+It's *logical* — "this row in `orders` changed from X to Y" — and it's written
+once per transaction, at commit, in commit order. It's the record other systems
+can consume: replicas, point-in-time recovery, CDC pipelines.
+
+A committed transaction must survive in *both* logs, and they must agree —
+a transaction in the binlog that InnoDB lost (or vice versa) means a replica
+that has data the primary doesn't. MySQL coordinates the two with an internal
+two-phase commit: prepare in InnoDB, write the binlog, commit in InnoDB.
+
+<Callout type="gotcha" title="Durability is two settings, not one">
+`innodb_flush_log_at_trx_commit = 1` makes the redo log durable per commit.
+`sync_binlog = 1` makes the binlog durable per commit. The default for both is
+1 in modern MySQL — but tuning guides love to relax them for throughput, and
+each relaxation has a different blast radius. Relax the redo setting and a
+crash loses the last second of *local* commits. Relax `sync_binlog` and a crash
+can lose binlog events that replicas *already applied* — your primary restarts
+missing transactions its replicas have, and replication breaks or silently
+diverges. Know which dial you're turning.
+</Callout>
+
+## Row vs statement: what actually goes in the log
+
+The binlog has formats, and the choice decides what "replaying the log" means.
+
+**Statement-based (SBR)** logs the SQL text: `UPDATE accounts SET balance =
+balance - 100 WHERE id = 42`. Compact, human-readable — and haunted by
+non-determinism. `UPDATE sessions SET expired = 1 ORDER BY last_seen LIMIT
+100` can match different rows on the replica. `NOW()`, `UUID()`, `RAND()`,
+user-defined functions — anything that doesn't evaluate identically on the
+replica makes the replica *silently diverge*. No error. Just different data,
+discovered months later.
+
+**Row-based (RBR)** — the default since 5.7 — logs the *effect*: the before and
+after images of each changed row. Deterministic by construction. The cost is
+volume: an `UPDATE` touching a million rows is one statement in SBR but a
+million row images in RBR.
+
+```sql
+-- See what's in the binlog (row events decoded)
+SHOW BINARY LOGS;
+mysqlbinlog --base64-output=decode-rows -vv binlog.000042 | less
+
+-- Current format
+SHOW VARIABLES LIKE 'binlog_format';          -- ROW
+SHOW VARIABLES LIKE 'binlog_row_image';       -- full | minimal
+```
+
+`binlog_row_image = minimal` logs only changed columns plus the key —
+dramatically smaller for wide tables (remember [Part 2](/mysql-02-data-types/):
+row width is a decision), but some CDC consumers want `full` images. Check what
+your pipeline needs before shrinking it.
+
+## How a replica actually replicates
+
+Replication is two independent jobs on the replica, and the split explains most
+lag mysteries:
+
+1. An **I/O thread** connects to the primary, streams binlog events, and
+   appends them to a local **relay log**. This is cheap — network and
+   sequential writes.
+2. **Applier threads** read the relay log and re-execute the changes against
+   the replica's own InnoDB — full price: index maintenance
+   ([Part 3](/mysql-03-indexes-and-the-b-tree/)), locking
+   ([Part 7](/mysql-07-locking-and-deadlocks/)), the works.
+
+By default all of this is **asynchronous**. The primary commits, acknowledges
+your write, and *then* replicas pull the event — milliseconds later on a good
+day. The primary does not wait, and does not know or care whether any replica
+is alive.
+
+That default has a sharp edge: if the primary dies after acknowledging a commit
+but before any replica fetched it, **the write is gone** when you promote a
+replica. Acknowledged ≠ replicated.
+
+## GTIDs: naming transactions instead of file offsets
+
+Classic replication coordinates by file and position: "I've read up to
+`binlog.000042`, offset 193841." Those coordinates are meaningful only on one
+server. After a failover, every other replica holds a bookmark into a file that
+no longer exists — repointing them at the new primary was historically a manual,
+error-prone archaeology exercise.
+
+A **GTID** (global transaction identifier) names the transaction itself:
+`source_uuid:sequence`, e.g. `3E11FA47-...:23`. Every server that applies the
+transaction records the same GTID. A replica connecting with
+`MASTER_AUTO_POSITION = 1` just says "here's the set of GTIDs I have" and the
+new primary sends everything it's missing — no file names, no offsets, no
+archaeology.
+
+```sql
+-- gtid_mode = ON, enforce_gtid_consistency = ON in my.cnf
+SELECT @@gtid_executed\G
+CHANGE REPLICATION SOURCE TO SOURCE_HOST = 'new-primary',
+  SOURCE_AUTO_POSITION = 1;
+```
+
+<Callout type="insight" title="GTIDs turn failover from a procedure into a decision">
+With file/position, failover is a runbook: find the most advanced replica,
+compute everyone else's new coordinates, hope. With GTIDs, any replica can be
+pointed at any server and work out the delta itself. Orchestrators
+(Orchestrator, MySQL Shell's AdminAPI, group replication) are all built on
+this property. If you run replicas without GTIDs in 2026, you're carrying
+operational risk for no benefit.
+</Callout>
+
+## Semi-sync: shrinking the loss window, not closing it
+
+**Semi-synchronous replication** makes the primary wait, at commit, until at
+least one replica acknowledges the transaction — then responds to the client.
+Two prints in small type:
+
+First, the replica acknowledges **receipt into its relay log**, not
+application. The data is on a second machine's disk, which is the point — but
+a freshly-promoted replica may still need seconds to apply its relay-log
+backlog before it reflects everything it acknowledged.
+
+Second, if no replica responds within `rpl_semi_sync_source_timeout`
+(default 10s), the primary **silently falls back to async** and keeps
+accepting writes. Availability wins over durability by default. The status
+variable `Rpl_semi_sync_source_status` tells you which mode you're actually
+in — alert on it, because the failure mode is "we thought we had semi-sync
+during the exact incident where it mattered."
+
+Use the `AFTER_SYNC` wait point (the default, sometimes called lossless
+semi-sync): the primary waits for the replica ack *before* committing in the
+engine, so a crashed primary can't expose data to clients that no replica ever
+received.
+
+## Lag: where it comes from, how it lies
+
+Replica lag is almost never the network. The I/O thread keeps up; it's the
+**appliers** that fall behind, because for years they were a single thread
+replaying — serially — a workload the primary executed with dozens of
+concurrent connections.
+
+Modern MySQL parallelizes the apply (`replica_parallel_workers` with
+**WRITESET** dependency tracking), which lets non-conflicting transactions
+replay concurrently and removes most steady-state lag. What parallelism cannot
+fix:
+
+- **Huge transactions.** A one-million-row `UPDATE` is one binlog event group;
+  the replica replays it alone, serially, while lag climbs. The batching
+  discipline from [Part 8](/mysql-08-schema-changes/) — thousands of rows per
+  transaction, not millions — is a *replication* rule as much as a locking one.
+- **DDL.** An `ALTER` that took an hour on the primary takes an hour on each
+  replica, during which that replica applies nothing else.
+
+<Callout type="gotcha" title="Seconds_Behind_Source reads 0 right up until it doesn't">
+The famous lag metric measures the timestamp delta of the event *currently
+being applied*. While a replica chews through a giant transaction, it's
+"applying the current event" — lag 0 — and the moment it finishes, lag jumps
+to minutes. It also reads 0 when the I/O thread is disconnected (nothing new
+is arriving, so nothing is "behind"). Monitor a heartbeat table or the GTID
+executed-set gap instead, and treat `Seconds_Behind_Source` as a hint, not a
+truth.
+</Callout>
+
+Lag also breaks **read-your-own-writes**: the user saves, the next page reads
+a replica that hasn't applied the save, and their edit "vanishes." The fixes
+are routing, not tuning — send post-write reads to the primary, or pin a
+session to the primary for a few seconds after it writes. (The same trap
+appears in [MongoDB's `nearest` read preference](/mongodb-05-read-preferences/)
+— it's a property of async replication, not of any one database.)
+
+## The binlog as a product: CDC
+
+The final reframe: the binlog isn't just for replicas. It's a totally-ordered
+stream of committed row changes — which is exactly what a change-data-capture
+pipeline wants. **Debezium** connects to MySQL *as if it were a replica*,
+streams row events, and publishes them to Kafka. `gh-ost` from
+[Part 8](/mysql-08-schema-changes/) tails it to keep a shadow table in sync.
+Cache invalidation, search-index sync (the database→Elasticsearch sync from
+[the ES series](/elasticsearch-08-design-decisions/)), audit trails — all of
+them are "another replica" to MySQL.
+
+That's why the binlog settings are worth respecting even on a server with no
+replicas today: `binlog_format = ROW`, GTIDs on, sensible retention
+(`binlog_expire_logs_seconds`). The day you need a replica, a warehouse feed,
+or an online migration, the log is already the shape every tool expects.
+
+---
+
+That closes the series loop: one server's guarantees ([Parts 1–9](/mysql-00-series-intro/))
+plus one honest log — and from that log, every multi-server property MySQL
+offers is derived.

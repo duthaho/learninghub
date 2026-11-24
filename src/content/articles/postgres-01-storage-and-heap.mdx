@@ -9,6 +9,15 @@ updated: 2026-09-07
 order: 51
 series: "Postgres"
 part: 1
+recall:
+  - q: "What is the fundamental storage difference between a Postgres table and an InnoDB table?"
+    a: "Postgres stores rows in an unordered heap; every index — the primary key included — is a separate B-tree pointing at heap locations. InnoDB stores the table itself as a clustered B-tree ordered by primary key."
+  - q: "Why is a secondary-index lookup one descent in Postgres but two in InnoDB?"
+    a: "A Postgres index leaf holds a TID — the physical heap address — so one descent reaches the row. An InnoDB secondary index holds the PK value, forcing a second descent through the clustered index (bookmark lookup)."
+  - q: "Do random UUIDv4 keys fragment a Postgres table the way they fragment InnoDB?"
+    a: "The heap can't fragment — it has no order. But the PK B-tree still splits pages under random inserts, so monotonic keys (UUIDv7) still keep the index compact."
+  - q: "What does TOAST actually do with an oversized value?"
+    a: "Compress first, then move out-of-line to the TOAST table only if the row still doesn't fit. A 3KB JSON may compress to 800 bytes and stay inline — compress-then-maybe-move, not move-always."
 ---
 
 import Callout from '../../components/Callout.astro';

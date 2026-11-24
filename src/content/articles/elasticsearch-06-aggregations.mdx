@@ -9,11 +9,20 @@ updated: 2026-07-30
 order: 15
 series: "Elasticsearch"
 part: 6
+recall:
+  - q: "How do you express `SELECT category, AVG(price) ... GROUP BY category`?"
+    a: "A metric aggregation (`avg`) nested inside a bucket aggregation (`terms` on category). Buckets carve groups; the metric runs once per bucket."
+  - q: "How does the `query` interact with aggregations in one request?"
+    a: "Query runs first; aggregations compute only over its matches — the same ordering as WHERE before GROUP BY. Narrow first, then aggregate."
+  - q: "How do you get a two-level GROUP BY?"
+    a: "Nest a bucket inside a bucket — `terms` on category containing `terms` on status — no join required. Nesting is the whole toolkit."
+  - q: "Which field type do terms aggregations need, and why?"
+    a: "`keyword` (or numeric) — buckets group by exact whole values. An analyzed `text` field would bucket by individual analyzed terms, not the original value."
 ---
 
 import Callout from '../../components/Callout.astro';
 
-*Elasticsearch deep-dive · Part 6 of 8. Previous: [Why results come back ranked: BM25](/elasticsearch-05-relevance-and-bm25/) · Next: [Running at scale: shards, replicas & the write path](/elasticsearch-07-scale-and-the-write-path/).*
+*Elasticsearch deep-dive · Part 6 of 9. Previous: [Why results come back ranked: BM25](/elasticsearch-05-relevance-and-bm25/) · Next: [Running at scale: shards, replicas & the write path](/elasticsearch-07-scale-and-the-write-path/).*
 
 Everything so far has answered one question: **which documents match?** You wrote queries, they filtered and ranked, they handed back a list of hits. Aggregations answer a completely different question — **what can I compute across the documents that matched?** Counts, averages, groupings, histograms, distributions.
 

@@ -9,6 +9,17 @@ updated: 2026-09-07
 order: 58
 series: "Postgres"
 part: 8
+recall:
+  - q: "What's the default isolation level in Postgres, and how does it differ from InnoDB's?"
+    a: "Postgres defaults to READ COMMITTED (fresh snapshot per statement); InnoDB defaults to REPEATABLE READ (snapshot per transaction)."
+  - q: "How does Postgres SERIALIZABLE (SSI) behave differently from lock-based serializability?"
+    a: "It's optimistic: transactions run without blocking, and dangerous dependency cycles abort one with a serialization failure — so it requires an application retry loop."
+  - q: "Why does a whole class of MySQL deadlocks simply not exist in Postgres?"
+    a: "Postgres has no gap locks — phantom prevention is snapshot-based, not lock-based. Row-level deadlocks still exist; gap-lock deadlocks don't."
+  - q: "What does `FOR UPDATE SKIP LOCKED` give you in one clause?"
+    a: "A concurrent work queue: each worker locks the rows it claims and skips rows other workers hold, instead of queueing behind them."
+  - q: "What happens if you set SERIALIZABLE everywhere but add no retry logic?"
+    a: "Serialization failures surface as user-facing errors, and under contention the system gets less reliable — SERIALIZABLE is only safe with retries."
 ---
 
 import Callout from '../../components/Callout.astro';

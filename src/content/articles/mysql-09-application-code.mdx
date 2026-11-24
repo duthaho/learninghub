@@ -9,6 +9,15 @@ updated: 2026-08-18
 order: 27
 series: "MySQL"
 part: 9
+recall:
+  - q: "Why doesn't a bigger connection pool mean more throughput?"
+    a: "The server can only truly run ~cores queries at once; extra connections queue and add context-switch and lock contention. The classic sizing rule is about `cores × 2`."
+  - q: "Why will EXPLAIN never catch an N+1?"
+    a: "Each of the N queries is individually excellent — one indexed lookup. The pathology is the count times network latency, visible only to a per-request query counter."
+  - q: "Why are prepared statements airtight where escaping is merely careful?"
+    a: "Code and data travel separately — the parameter never participates in parsing, so it can't change the query's structure. Escaping is a blocklist; blocklists leak."
+  - q: "Your table is utf8mb4 but emoji still get mangled. Where's the bug?"
+    a: "The connection charset — negotiated by the driver separately from the schema. A client connecting as `utf8` mangles emoji into a perfect utf8mb4 table. Force `charset=utf8mb4` in the client config."
 ---
 
 import Callout from '../../components/Callout.astro';
@@ -301,4 +310,4 @@ corrupts a perfect schema, a leaked connection starves a perfectly sized pool.
 That's the whole series. To retrace any thread from the top, head back to the
 [series guide](/mysql-00-series-intro/).
 
-*MySQL deep-dive · Part 9 of 9. Back to the [series guide](/mysql-00-series-intro/).*
+*MySQL deep-dive · Part 9 of 10. Next: [Replication & the binlog](/mysql-10-replication-and-binlog/). Back to the [series guide](/mysql-00-series-intro/).*

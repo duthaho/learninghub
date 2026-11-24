@@ -9,6 +9,15 @@ updated: 2026-09-07
 order: 54
 series: "Postgres"
 part: 4
+recall:
+  - q: "Is `varchar(255)` smaller or faster than `text` in Postgres?"
+    a: "No — same storage, same TOAST behaviour, same scan speed. The 255 only buys a write-path length check. Prefer `text`, with a `CHECK` constraint if you genuinely need the boundary."
+  - q: "What does `timestamptz` actually store?"
+    a: "A UTC instant in 8 bytes — no timezone is stored. The session `TimeZone` only governs conversion on input and display."
+  - q: "Why can the literal `'2026-09-07 10:00:00'` store different instants from different servers?"
+    a: "Without an explicit offset it's interpreted in the session's timezone before converting to UTC. Always send an explicit offset, or use `now()`."
+  - q: "`serial` vs `GENERATED ... AS IDENTITY` — which and why?"
+    a: "Identity. It's SQL-standard and the sequence is owned by the column, avoiding serial's grant/ownership quirks. Same underlying sequence machinery."
 ---
 
 import Callout from '../../components/Callout.astro';

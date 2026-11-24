@@ -9,11 +9,20 @@ updated: 2026-11-24
 order: 56
 series: "MongoDB"
 part: 5
+recall:
+  - q: "Why does `nearest` break read-your-own-writes?"
+    a: "The latency-closest node may be a lagging secondary: the user writes to the primary, immediately reads from that secondary, and their save appears to vanish. Route post-write reads to primary."
+  - q: "Why can't `maxStalenessSeconds` go below 90?"
+    a: "Staleness is estimated from 10-second heartbeats — too imprecise to enforce less. Need tighter freshness? Use `primary`, not a small maxStaleness."
+  - q: "What three decisions does a read preference make at once?"
+    a: "Throughput (which nodes share read load), consistency (how stale data can be), and latency (how far the read travels). The five modes are one dial over all three."
+  - q: "When is `secondaryPreferred` a sound choice?"
+    a: "Offloading staleness-tolerant read traffic — analytics, dashboards, feeds — while falling back to the primary when no secondary is available."
 ---
 
 import Callout from '../../components/Callout.astro';
 
-*MongoDB deep-dive · Part 5 of 10. Previous: [Replica sets & elections](/mongodb-04-replica-sets/). Next: [Aggregation pipeline](/mongodb-06-aggregation/).*
+*MongoDB deep-dive · Part 5 of 11. Previous: [Replica sets & elections](/mongodb-04-replica-sets/). Next: [Aggregation pipeline](/mongodb-06-aggregation/).*
 
 A MongoDB replica set has one primary and one or more secondaries. Writes must
 go to the primary. Reads can go anywhere — that's where the choice begins.

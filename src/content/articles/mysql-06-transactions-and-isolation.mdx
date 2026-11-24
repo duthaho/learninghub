@@ -9,11 +9,20 @@ updated: 2026-08-18
 order: 24
 series: "MySQL"
 part: 6
+recall:
+  - q: "What's MySQL's default isolation level, and is that typical?"
+    a: "REPEATABLE READ — unusual; Postgres, Oracle, and SQL Server default to READ COMMITTED. A snapshot is frozen at first read and held for the whole transaction."
+  - q: "Distinguish 'non-repeatable read' from 'REPEATABLE READ'."
+    a: "One is the anomaly (a row changes between your reads); the other is the isolation level that prevents it. Near-identical phrases, opposite roles."
+  - q: "Does InnoDB REPEATABLE READ allow phantoms?"
+    a: "The standard permits them, but InnoDB prevents them: plain reads see a frozen snapshot, and locking reads take next-key (gap) locks so no matching INSERT can slip in."
+  - q: "Can the same WHERE clause return different results twice in one transaction?"
+    a: "Yes — a plain SELECT reads your snapshot; `SELECT ... FOR UPDATE` (and UPDATE/DELETE) reads the latest committed state. Locking reads see current reality by design."
 ---
 
 import Callout from '../../components/Callout.astro';
 
-*MySQL deep-dive · Part 6 of 9. Next: [Locking and deadlocks](/mysql-07-locking-and-deadlocks/).*
+*MySQL deep-dive · Part 6 of 10. Next: [Locking and deadlocks](/mysql-07-locking-and-deadlocks/).*
 
 Most people think of a transaction as "a bunch of statements that succeed or fail
 together." That's the **A** in ACID, and it's the easy part. The hard part — the

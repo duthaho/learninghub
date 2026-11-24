@@ -9,11 +9,20 @@ updated: 2026-11-24
 order: 61
 series: "MongoDB"
 part: 10
+recall:
+  - q: "What replaced `db.currentOp()` and why is it better?"
+    a: "The `$currentOp` aggregation stage (helper deprecated in 6.2) — you filter and project with the full pipeline (`secs_running`, `ns`) instead of post-processing."
+  - q: "Why is profiler level 2 dangerous on a write-heavy cluster?"
+    a: "It logs ALL operations to `system.profile` — the profiling writes are themselves operations, creating a write feedback loop. Level 1 (slow ops only) gives the signal without the overhead."
+  - q: "What are the four signals worth alerting on?"
+    a: "Replication lag, connections, oplog window, and slow operations — they cover falling behind, resource exhaustion, shrinking recovery headroom, and degrading queries."
+  - q: "What's the RBAC baseline for a monitoring agent?"
+    a: "Minimum privilege: the built-in `clusterMonitor` role — read-only visibility into cluster state, no data access, no admin writes."
 ---
 
 import Callout from '../../components/Callout.astro';
 
-*MongoDB deep-dive · Part 10 of 10. Previous: [Backup & point-in-time recovery](/mongodb-09-backup/).*
+*MongoDB deep-dive · Part 10 of 11. Previous: [Backup & point-in-time recovery](/mongodb-09-backup/). Next: [Under the hood: WiredTiger storage](/mongodb-11-wiredtiger/).*
 
 Monitoring and security are both about surface area: monitoring tells you
 which part of the system is behaving unexpectedly, and security limits which

@@ -9,6 +9,17 @@ updated: 2026-09-07
 order: 53
 series: "Postgres"
 part: 3
+recall:
+  - q: "Does plain VACUUM shrink the table on disk?"
+    a: "No — it marks dead-tuple space reusable in the Free Space Map so future writes recycle it. Only `VACUUM FULL` (ACCESS EXCLUSIVE, full rewrite) returns space to the OS."
+  - q: "What two conditions make an UPDATE a HOT update?"
+    a: "No indexed column changed, and the new tuple fits on the same heap page (fillfactor headroom helps). Then no index entries need updating at all."
+  - q: "You update `last_login`; a composite index exists on `(user_id, last_login)`. HOT-eligible?"
+    a: "No. 'Indexed column' counts membership anywhere — composite or expression indexes included. That one index breaks HOT for the whole row."
+  - q: "What is XID wraparound, and what does vacuum have to do with it?"
+    a: "XIDs are 32-bit and circular; tuples older than ~2B transactions would flip visibility. Vacuum freezes old tuples to stop their aging — if freezing falls behind, Postgres fires mandatory aggressive vacuums and can ultimately refuse writes."
+  - q: "Autovacuum causes I/O spikes — what's the correct fix?"
+    a: "Tune it to run more often in smaller bites (lower scale factors, adjusted cost limits). Never disable it: bloat grows, index-only scans die, and the anti-wraparound vacuum fires anyway — unthrottled."
 ---
 
 import Callout from '../../components/Callout.astro';

@@ -9,6 +9,15 @@ updated: 2026-08-13
 order: 5
 series: "Redis"
 part: 4
+recall:
+  - q: "Does pipelining `GET` then `DECR` make them atomic?"
+    a: "No. Pipelining only removes round-trips; the server freely interleaves other clients' commands between them. Pipelining is speed; MULTI/EXEC and Lua are atomicity."
+  - q: "Is `WATCH` a lock?"
+    a: "No — it's a collision detector: EXEC aborts if a watched key changed, and you retry. No blocking or deadlocks, but the retry cost grows with contention."
+  - q: "Do Redis transactions roll back on error like SQL?"
+    a: "No. A runtime error mid-EXEC leaves earlier commands applied — there is no undo. Queueing errors abort the EXEC, runtime errors don't."
+  - q: "When do you need Lua (or a function) instead of MULTI/EXEC?"
+    a: "When later commands depend on earlier reads — read-decide-write logic. MULTI queues commands blindly; a Lua script runs the whole decision atomically on the server."
 ---
 
 import Callout from '../../components/Callout.astro';

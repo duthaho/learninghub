@@ -9,11 +9,20 @@ updated: 2026-11-24
 order: 52
 series: "MongoDB"
 part: 1
+recall:
+  - q: "What does the ESR rule say about compound-index key order?"
+    a: "Equality fields first, then Sort fields, then Range fields. That order lets the index serve the filter and deliver rows already sorted, with the range scan last."
+  - q: "How does an ESR violation show up in `explain()`?"
+    a: "As a SORT stage with `memUsage` populated — not as a high docsExamined ratio. The index still serves the predicate; the CPU cost hides in the in-memory sort."
+  - q: "What's the explain() signature of a covered query?"
+    a: "`IXSCAN` with no `FETCH` stage after it (and `totalDocsExamined: 0`). If you see IXSCAN → FETCH, documents are being loaded — often just a projection issue."
+  - q: "Why is an index 'a bet placed at write-time'?"
+    a: "Every insert/update pays to maintain it, win or lose. The bet pays off only if queries actually use its key order — unused or misordered indexes are pure write tax."
 ---
 
 import Callout from '../../components/Callout.astro';
 
-*MongoDB deep-dive · Part 1 of 10. Previous: [Series intro](/mongodb-00-series-intro/). Next: [Reading execution plans](/mongodb-02-execution-plans/).*
+*MongoDB deep-dive · Part 1 of 11. Previous: [Series intro](/mongodb-00-series-intro/). Next: [Reading execution plans](/mongodb-02-execution-plans/).*
 
 An index is a sorted copy of a subset of your data, maintained automatically by
 the storage engine so that queries don't need to walk every document in a

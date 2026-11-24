@@ -1,0 +1,115 @@
+---
+// End-of-article active-recall block. Native <details> — no JS, works everywhere.
+interface Props {
+  cards: { q: string; a: string }[];
+}
+const { cards } = Astro.props;
+const base = import.meta.env.BASE_URL;
+
+// Minimal inline-markdown: `code` spans only (escape everything else).
+const esc = (s: string) =>
+  s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const md = (s: string) =>
+  esc(s).replace(/`([^`]+)`/g, '<code>$1</code>');
+---
+
+<section class="recall" data-no-copy>
+  <p class="recall-eyebrow">Recall · check yourself</p>
+  <h2 class="recall-head">Before you go</h2>
+  <p class="recall-lede">
+    Answer from memory first, then reveal. These cards also live in the
+    <a href={`${base}review/`}>review queue</a> — come back in a few days.
+  </p>
+  <ol class="cards" role="list">
+    {cards.map((c, i) => (
+      <li>
+        <details class="card">
+          <summary>
+            <span class="card-id">R{String(i + 1).padStart(2, '0')}</span>
+            <span class="card-q" set:html={md(c.q)} />
+            <span class="card-chev" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="14" height="14"><path d="M9 6l6 6-6 6"/></svg>
+            </span>
+          </summary>
+          <p class="card-a" set:html={md(c.a)} />
+        </details>
+      </li>
+    ))}
+  </ol>
+</section>
+
+<style>
+  .recall {
+    margin: 3.2rem 0 1rem;
+    padding-top: 1.8rem;
+    border-top: 3px double var(--line-strong);
+  }
+  .recall-eyebrow {
+    margin: 0 0 0.5rem;
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    font-weight: 500;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+  .recall-head {
+    font-family: var(--font-display);
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    font-size: clamp(1.5rem, 3.2vw, 1.9rem);
+    margin: 0;
+  }
+  .recall-lede { color: var(--ink-soft); margin: 0.6rem 0 1.4rem; max-width: 52ch; }
+  .recall-lede a { color: var(--accent-ink); }
+
+  .cards { list-style: none; margin: 0; padding: 0; }
+  .cards li { border-bottom: 1px solid var(--line); }
+  .cards li:first-child { border-top: 1px solid var(--line); }
+
+  .card > summary {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: baseline;
+    gap: 1rem;
+    padding: 0.85rem 0.25rem;
+    cursor: pointer;
+    list-style: none;
+    transition: background 0.12s var(--ease-out);
+  }
+  .card > summary::-webkit-details-marker { display: none; }
+  .card > summary:hover { background: var(--paper-raised); }
+  .card > summary:focus-visible { outline: 2px solid var(--color-focus); outline-offset: -2px; }
+
+  .card-id {
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.1em;
+    color: var(--accent);
+  }
+  .card-q { font-size: 1.02rem; line-height: 1.5; color: var(--ink); }
+  .card-q :global(code), .card-a :global(code) {
+    font-family: var(--font-mono);
+    font-size: 0.85em;
+    background: var(--paper-sunk);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    padding: 0.08em 0.3em;
+  }
+  .card-chev { color: var(--accent); align-self: center; display: grid; place-items: center; transition: transform 0.2s var(--ease-out); }
+  .card-chev svg { fill: none; stroke: currentColor; stroke-width: 2; }
+  .card[open] > summary .card-chev { transform: rotate(90deg); }
+
+  .card-a {
+    margin: 0;
+    padding: 0.2rem 0.25rem 1rem 2.6rem;
+    color: var(--ink-soft);
+    font-size: 0.98rem;
+    line-height: 1.6;
+    max-width: 58ch;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .card-chev, .card > summary { transition: none; }
+  }
+</style>

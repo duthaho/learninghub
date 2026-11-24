@@ -9,6 +9,15 @@ updated: 2026-08-13
 order: 9
 series: "Redis"
 part: 8
+recall:
+  - q: "What's the hidden cost of serving reads from replicas?"
+    a: "Staleness — replication is async, so a replica can lag the primary. Fine for caches and leaderboards; a trap for read-your-own-write flows."
+  - q: "Primary + replicas + Sentinel: is a write acknowledged to the client safe?"
+    a: "No — the primary can ack and die before the write reaches any replica; the promoted replica never had it. Sentinel buys availability, not durability. HA is not zero-loss."
+  - q: "Why does `MGET a b` fail with CROSSSLOT in Cluster, and what's the fix?"
+    a: "Multi-key commands require all keys in one hash slot. Hash tags fix it: only the `{...}` substring is hashed, so `user:{42}:profile` and `user:{42}:sessions` share a slot — design keys for it up front."
+  - q: "Replication, Sentinel, Cluster — which problem does each solve?"
+    a: "Replication: copies + read scaling. Sentinel: automatic failover (availability) for one primary. Cluster: sharding the keyspace (write/memory scaling) with failover built in."
 ---
 
 import Callout from '../../components/Callout.astro';

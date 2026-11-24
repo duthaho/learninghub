@@ -9,6 +9,15 @@ updated: 2026-08-13
 order: 2
 series: "Redis"
 part: 1
+recall:
+  - q: "Why is `INCR` race-free under thousands of concurrent clients with no lock?"
+    a: "The single thread runs each command to completion before the next starts. Atomicity isn't bolted on — it's a property of the execution model."
+  - q: "Redis uses threads since 6.0 — does the single-threaded mental model still hold?"
+    a: "Yes. Extra threads handle network I/O and background jobs (snapshots, AOF rewrite, UNLINK); command execution is still serial on the main thread."
+  - q: "What's the actual scaling path for Redis, if not adding threads?"
+    a: "Horizontal: shard the keyspace across instances (Cluster), so each shard's single thread owns a slice on its own core. N cores across N shards, not N threads in one instance."
+  - q: "What's the system-wide consequence of one O(n) command like `KEYS *`?"
+    a: "Head-of-line blocking: every client stalls behind it, because there's exactly one execution thread. One slow command = everyone slow at once."
 ---
 
 import Callout from '../../components/Callout.astro';

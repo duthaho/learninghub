@@ -9,11 +9,20 @@ updated: 2026-11-24
 order: 53
 series: "MongoDB"
 part: 2
+recall:
+  - q: "`totalDocsExamined: 0` with non-zero `nReturned` means what?"
+    a: "A covered query — answered entirely from the index, no documents loaded. The gold standard for read-heavy paths."
+  - q: "A SORT stage appears even though the sort field is in the compound index. Why?"
+    a: "Key order misalignment — the sort field sits before or after the range field instead of between equality and range (ESR violation). The index is used for the predicate but can't deliver sorted output."
+  - q: "Which ratio flags an inefficient scan in explain()?"
+    a: "`totalDocsExamined` vs `nReturned` — examining thousands to return ten means the index isn't selective for this query shape."
+  - q: "executionStats vs queryPlanner mode — what's the difference?"
+    a: "queryPlanner shows the chosen (winning) plan without running it; executionStats actually executes and reports real counts and timings per stage."
 ---
 
 import Callout from '../../components/Callout.astro';
 
-*MongoDB deep-dive · Part 2 of 10. Previous: [Indexes in depth](/mongodb-01-indexes/). Next: [Write concerns & read concerns](/mongodb-03-write-read-concerns/).*
+*MongoDB deep-dive · Part 2 of 11. Previous: [Indexes in depth](/mongodb-01-indexes/). Next: [Write concerns & read concerns](/mongodb-03-write-read-concerns/).*
 
 If [Part 1](/mongodb-01-indexes/) is about placing the right bet, this part is
 about reading the receipts. `explain()` is MongoDB's way of showing you what

@@ -9,6 +9,15 @@ updated: 2026-08-13
 order: 3
 series: "Redis"
 part: 2
+recall:
+  - q: "Why is a Redis List the wrong type for random access?"
+    a: "`LINDEX`/`LINSERT` into the middle is O(n) — Redis walks links from an end, on the single thread. Lists earn their keep at the ends (queues, stacks)."
+  - q: "What's the complexity of Sorted Set lookups, and why is that still the right choice?"
+    a: "O(log n) (`ZRANK`), O(log n + M) for ranges — not O(1). It beats the naive Hash + sort approach (blocking O(N) HGETALL plus O(N log N) sort) because order is maintained on write."
+  - q: "What makes choosing a Redis type a modeling decision rather than a syntax choice?"
+    a: "Each structure fixes which operations are cheap. Pick by access pattern — ends vs middle, membership vs ranking, field updates vs whole-value — not by what the data looks like."
+  - q: "When do Hashes beat a JSON blob in a String?"
+    a: "When you read or update individual fields: `HSET`/`HGET` touch one field without deserialising the whole object, and small hashes are stored compactly (listpack)."
 ---
 
 import Callout from '../../components/Callout.astro';

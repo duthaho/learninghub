@@ -9,11 +9,20 @@ updated: 2026-08-18
 order: 26
 series: "MySQL"
 part: 8
+recall:
+  - q: "What does writing `ALGORITHM=INPLACE, LOCK=NONE` on an ALTER actually do?"
+    a: "It's a guarantee, not a mode switch: MySQL already auto-picks the least-locking algorithm, but silently falls back to COPY when it can't. Pinning makes it error out instead — fail-loud."
+  - q: "Your `ALGORITHM=INSTANT` ALTER hangs — and now every query on the table hangs. Why?"
+    a: "A long-running transaction holds the metadata lock; the ALTER queues for its exclusive MDL, and MDL queues are FIFO, so everything else queues behind it. Check for idle transactions before DDL."
+  - q: "Why is `ON DELETE CASCADE` a landmine at scale?"
+    a: "The cascade runs in one transaction — deleting a parent with 2M children locks 2M rows, bloats undo, floods replication. Many teams keep RESTRICT and batch child deletes in app code."
+  - q: "When do you reach for gh-ost or pt-online-schema-change?"
+    a: "When even native online DDL's brief final MDL can't be grabbed on an extremely hot table. They build a synced shadow copy and swap it in with an atomic rename."
 ---
 
 import Callout from '../../components/Callout.astro';
 
-*MySQL deep-dive · Part 8 of 9. Next: [MySQL from application code](/mysql-09-application-code/).*
+*MySQL deep-dive · Part 8 of 10. Next: [MySQL from application code](/mysql-09-application-code/).*
 
 There's a piece of folklore that follows every backend engineer around: "adding a
 column or an index to a big table locks it, so schedule a maintenance window."

@@ -9,11 +9,18 @@ updated: 2026-11-24
 order: 60
 series: "MongoDB"
 part: 9
+recall:
+  - q: "Why does `mongodump --oplog` fail on a standalone mongod?"
+    a: "It reads `local.oplog.rs`, which only exists on replica-set members. Dump from a secondary to spare the primary the read load."
+  - q: "Sketch the point-in-time restore workflow."
+    a: "Base `mongodump --oplog` → `mongorestore --oplogReplay` to the dump's end timestamp → extract live oplog entries covering the gap → replay with `--oplogLimit` to just before the bad write."
+  - q: "What's the first question to ask about any backup strategy?"
+    a: "When did you last test a restore? An untested backup is a hope, not a strategy — and the gaps (what it doesn't capture) matter more than the technique."
 ---
 
 import Callout from '../../components/Callout.astro';
 
-*MongoDB deep-dive · Part 9 of 10. Previous: [Change streams & oplog tailing](/mongodb-08-change-streams/). Next: [Monitoring & security](/mongodb-10-monitoring/).*
+*MongoDB deep-dive · Part 9 of 11. Previous: [Change streams & oplog tailing](/mongodb-08-change-streams/). Next: [Monitoring & security](/mongodb-10-monitoring/).*
 
 MongoDB backup is not a single switch. It's a decision tree: logical vs
 physical, replica member vs primary, oplog-augmented vs snapshot-only. Each

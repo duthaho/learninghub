@@ -9,6 +9,15 @@ updated: 2026-08-13
 order: 8
 series: "Redis"
 part: 7
+recall:
+  - q: "What does `appendfsync everysec` actually promise?"
+    a: "At most ~1 second of writes lost — not zero. Between fsyncs, 'written to the AOF' means an OS buffer in RAM, and power loss wipes it."
+  - q: "Why isn't `appendfsync always` the obvious choice?"
+    a: "It fsyncs every command — near-zero loss but usually too slow for production throughput. Durability is a dial: zero (always) → ~1s (everysec) → minutes (RDB-only)."
+  - q: "What's the standard production persistence baseline?"
+    a: "AOF `everysec` (bounds loss to ~1s) plus periodic RDB snapshots (compact file for backup and fast restore)."
+  - q: "How should you choose a persistence config?"
+    a: "Name your acceptable data-loss window first, then pick the config that fits it — durability is a window you choose, not a switch you flip."
 ---
 
 import Callout from '../../components/Callout.astro';

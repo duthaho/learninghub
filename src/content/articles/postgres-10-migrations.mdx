@@ -9,6 +9,17 @@ updated: 2026-09-07
 order: 60
 series: "Postgres"
 part: 10
+recall:
+  - q: "What does transactional DDL let you do that MySQL can't?"
+    a: "Wrap several ALTERs in BEGIN/COMMIT and roll them all back — a failed migration leaves nothing half-applied. Atomic, though not non-blocking."
+  - q: "Why can't `CREATE INDEX CONCURRENTLY` run inside a transaction?"
+    a: "It works in multiple phases with its own internal transactions, waiting out concurrent snapshots between them — impossible inside one atomic transaction."
+  - q: "The production-safe pattern for adding a constraint to a big table?"
+    a: "`ADD CONSTRAINT ... NOT VALID` (instant, brief lock, new rows checked), then `VALIDATE CONSTRAINT` (scans with a weak lock that doesn't block writes)."
+  - q: "Does wrapping a plain `ADD CONSTRAINT ... CHECK` in a transaction make it safe?"
+    a: "No — it still takes ACCESS EXCLUSIVE and scans every row while holding it; the transaction just extends how long the lock is held."
+  - q: "How do you retire a month of old data without a dead-tuple storm?"
+    a: "`DETACH PARTITION` + `DROP TABLE` — instant, no dead tuples, no vacuum debt. A mass DELETE creates hours of autovacuum work."
 ---
 
 import Callout from '../../components/Callout.astro';

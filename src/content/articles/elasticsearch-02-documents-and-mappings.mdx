@@ -9,11 +9,20 @@ updated: 2026-07-30
 order: 11
 series: "Elasticsearch"
 part: 2
+recall:
+  - q: "`text` vs `keyword` — two types or two treatments?"
+    a: "Two treatments of one string: `text` is analyzed into searchable terms; `keyword` is kept whole as a single term (searchable exactly, sortable, aggregatable). Every behavioural difference follows."
+  - q: "A sync job once sent `\"price\": \"99.99\"` as its first document. What's the damage?"
+    a: "Dynamic mapping fixed `price` as text for the life of the index — numeric ranges and sorts are broken, and no PUT can change a mapped field's type. The cure is a new index + `_reindex`."
+  - q: "Why write explicit mappings for fields you care about?"
+    a: "Because mapping mistakes are permanent per index — a wrong first guess by dynamic mapping costs a full reindex to undo."
+  - q: "What does dynamic mapping do with a string value by default?"
+    a: "Maps it as `text` with a `.keyword` sub-field — analyzed for search, whole for exact match/aggregation. Convenient, but it's a guess being written into stone."
 ---
 
 import Callout from '../../components/Callout.astro';
 
-*Elasticsearch deep-dive · Part 2 of 8. Previous: [Elasticsearch, from the ground up](/elasticsearch-01-mental-model/) · Next: [How Elasticsearch reads text](/elasticsearch-03-text-analysis/).*
+*Elasticsearch deep-dive · Part 2 of 9. Previous: [Elasticsearch, from the ground up](/elasticsearch-01-mental-model/) · Next: [How Elasticsearch reads text](/elasticsearch-03-text-analysis/).*
 
 In Part 1 we drew the rough equivalence: an index is roughly a table, and a document is roughly a row. That gets you oriented, but it dodges the question a backend engineer asks next. When you send Elasticsearch a lump of JSON, how does it know that `name` is searchable text, `price` is a number you can sort and filter on ranges, and `created_at` is a date it can bucket by month? A relational database knows because you wrote `CREATE TABLE` first. Elasticsearch knows because of the **mapping** — and the twist is that it will happily write that mapping for you, from the first document you send, whether you meant it to or not.
 

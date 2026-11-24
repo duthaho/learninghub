@@ -9,6 +9,15 @@ updated: 2026-08-13
 order: 11
 series: "Redis"
 part: 10
+recall:
+  - q: "All endpoints get slow at once — what does that symptom shape tell you?"
+    a: "Head-of-line blocking on the single thread: one blocking command or big key is monopolising execution. Hunt with SLOWLOG and `redis-cli --bigkeys`."
+  - q: "Why is 'buy a bigger instance' usually the wrong fix for Redis latency?"
+    a: "A bigger box still has one execution thread. A `KEYS *`, giant `SMEMBERS`, sync DEL of a big key, or fork stall reproduces identically. Diagnose first; scale only for genuine throughput/memory pressure."
+  - q: "What's the production-safe way to delete a multi-million-member key?"
+    a: "`UNLINK` (reclaims in a background thread) — or incremental deletion via SCAN batches. A synchronous `DEL` blocks everyone while it frees memory."
+  - q: "Name the big-key fork cost."
+    a: "RDB snapshots and AOF rewrites fork; copy-on-write makes memory spike with write volume during the fork, and fork time grows with dataset size — a latency stall every snapshot."
 ---
 
 import Callout from '../../components/Callout.astro';

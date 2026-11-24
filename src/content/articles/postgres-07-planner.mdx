@@ -9,6 +9,17 @@ updated: 2026-09-07
 order: 57
 series: "Postgres"
 part: 7
+recall:
+  - q: "Where do the planner's row estimates come from?"
+    a: "`pg_statistic`, populated by ANALYZE: per-column MCV lists, histograms, null fraction, and n_distinct."
+  - q: "Why does the planner badly underestimate `WHERE city = 'X' AND zip = 'Y'`?"
+    a: "The independence assumption: it multiplies per-column selectivities, but city and zip are correlated. Fix with `CREATE STATISTICS` extended statistics."
+  - q: "Can running ANALYZE fix a correlated-predicate misestimate?"
+    a: "No — ANALYZE only refreshes independent per-column stats. `CREATE STATISTICS` is a separate, additive mechanism (then ANALYZE populates it)."
+  - q: "What exactly is `work_mem` scoped to?"
+    a: "Each sort/hash node in each backend. One query with five such nodes can use 5× work_mem; multiply by concurrent backends before raising the global value — set it per-session instead."
+  - q: "When does a nested-loop join beat a hash join?"
+    a: "Few outer rows with an indexed inner lookup. Hash wins for large unordered inputs scanned once; merge wins when both inputs are already sorted."
 ---
 
 import Callout from '../../components/Callout.astro';

@@ -9,6 +9,15 @@ updated: 2026-08-13
 order: 7
 series: "Redis"
 part: 6
+recall:
+  - q: "`PUBLISH` returned 0 — is that an error?"
+    a: "No, it's a normal success meaning nobody was subscribed at that instant; the message evaporated. The return counts who was tuned in, not delivery guarantees."
+  - q: "The one-line test for Pub/Sub vs Streams?"
+    a: "'If a consumer is down for 5 seconds, may we lose that window's messages?' Yes → Pub/Sub (fire-and-forget). No → Streams (retained, replayable, acknowledged)."
+  - q: "What do consumer groups add to a Stream?"
+    a: "Work distribution with accountability: each entry goes to one member, sits in the pending list until `XACK`, and can be claimed from a dead consumer — at-least-once delivery."
+  - q: "Are Streams durable across a crash?"
+    a: "Only as durable as persistence config: entries survive delivery in memory, but surviving a process crash depends on AOF/RDB. Streams on a persistence-less instance die with the process."
 ---
 
 import Callout from '../../components/Callout.astro';

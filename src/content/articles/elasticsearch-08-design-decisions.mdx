@@ -9,11 +9,20 @@ updated: 2026-07-30
 order: 17
 series: "Elasticsearch"
 part: 8
+recall:
+  - q: "What architecture do most production search systems converge on?"
+    a: "Source of truth in a transactional DB; a denormalised, read-optimised copy synced into Elasticsearch for search and analytics. Complement, not replacement."
+  - q: "Which responsibilities stay with the database, and which move to Elasticsearch?"
+    a: "DB: correctness, transactions, relationships, writes. ES: text search, relevance ranking, aggregations at scale over a projection of the data."
+  - q: "What's the one sentence under most Elasticsearch disasters?"
+    a: "'It's a faster, more flexible database, so it can replace my relational database.' Treating complements as substitutes inherits exactly the weaknesses each was never designed to cover."
+  - q: "How do you decide if a feature is a search problem or a system-of-record problem?"
+    a: "Ask what breaks when it's eventually consistent and unjoined. Needs atomicity, immediacy, or relationships → database. Needs ranking, fuzziness, or cross-document computation → search engine."
 ---
 
 import Callout from '../../components/Callout.astro';
 
-*Elasticsearch deep-dive · Part 8 of 8. Previous: [Running at scale](/elasticsearch-07-scale-and-the-write-path/).*
+*Elasticsearch deep-dive · Part 8 of 9. Previous: [Running at scale](/elasticsearch-07-scale-and-the-write-path/). Next: [Operating Elasticsearch in production](/elasticsearch-09-operations/).*
 
 Seven parts in, you can describe the inverted index, tune an analyzer, write a
 `bool` query, reason about BM25, build an aggregation, and shard a cluster. But
