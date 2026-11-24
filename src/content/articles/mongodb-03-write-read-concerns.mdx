@@ -1,0 +1,217 @@
+---
+title: "Write concerns & read concerns"
+subtitle: "Every write MongoDB acknowledges is a promise. The concern level defines exactly how much of that promise you can cash."
+description: "What w:majority with j:true actually guarantees, the voting-node detail operators miss, the four read concern levels, and when linearizable is worth its latency cost."
+level: "Intermediate · Durability"
+accent: "#13AA52"
+readingTime: "14 min read"
+updated: 2026-11-24
+order: 54
+series: "MongoDB"
+part: 3
+---
+
+import Callout from '../../components/Callout.astro';
+
+*MongoDB deep-dive · Part 3 of 10. Previous: [Reading execution plans](/mongodb-02-execution-plans/). Next: [Replica sets & elections](/mongodb-04-replica-sets/).*
+
+MongoDB is a distributed database that runs on commodity hardware that fails.
+Write concerns and read concerns are the knobs that let you decide how much you
+trust any given acknowledgement and how much consistency you demand on any given
+read. Get them right and you have clear durability guarantees; leave them at
+defaults you don't understand and you'll have an incident that's genuinely
+hard to explain.
+
+## Write concerns
+
+A write concern tells MongoDB: before you acknowledge this write to my
+application, satisfy this condition.
+
+The two dimensions are `w` (how many nodes acknowledge it) and `j` (whether
+the acknowledging nodes have journaled it):
+
+| Config | Guarantee |
+|--------|-----------|
+| `w:0` | Fire and forget — no acknowledgement at all |
+| `w:1` | Primary acknowledged receipt |
+| `w:1, j:false` | Primary received it in memory; crash before journal flush loses it |
+| `w:1, j:true` | Primary wrote it to its on-disk journal; survives a crash of that node |
+| `w:"majority"` | A majority of **voting** nodes acknowledged |
+| `w:"majority", j:true` | A majority of voting nodes journaled it; survives failures |
+
+Since MongoDB 5.0, `w:"majority"` is the **default** write concern. This was a
+deliberate hardening change — the old default of `w:1` was responsible for
+many production data-loss incidents.
+
+### The voting-node precision
+
+`w:"majority"` does not mean "a majority of all nodes" or "almost all
+secondaries." It means a majority of **voting** nodes.
+
+A voting node is any member of the replica set whose `votes` configuration is
+set to `1` (the default). Non-voting members (arbiters with `votes:0`, or
+delayed secondaries configured as `votes:0`) do not count toward the quorum.
+
+For a standard 3-node replica set (all nodes voting), majority is 2. So
+`w:"majority"` requires 2 acknowledgements: the primary plus one secondary.
+For a 5-node set, majority is 3.
+
+<Callout type="gotcha" title="Adding a non-voting delayed secondary changes nothing about majority">
+  A common topology is a 3-node PSS set plus a delayed secondary used for
+  backup reads, configured with `votes:0` to keep it out of elections. With
+  this topology, `w:"majority"` still requires only 2 acks (primary + 1
+  voting secondary), not 3. The delayed secondary's replication state is
+  irrelevant to write concern satisfaction.
+</Callout>
+
+### What j:true actually guarantees
+
+`j:true` requires that the acknowledging node has written the operation to its
+**journal** before sending the ack. The journal is a WAL (write-ahead log) on
+disk. Even if the MongoDB process crashes immediately after journaling, the
+operation survives and will be replayed on restart.
+
+Without `j:true`, an ack from a node means the write is in that node's memory
+(and possibly in the OS page cache), but a power loss or hard kill before the
+next journal flush — which happens every 100ms by default — loses it
+permanently.
+
+```python
+from pymongo import MongoClient, WriteConcern
+
+client = MongoClient()
+db = client.mydb
+
+# Production default: durable on majority of voting nodes
+col = db.events.with_options(
+    write_concern=WriteConcern(w="majority", j=True)
+)
+
+result = col.insert_one({"event": "order.placed", "order_id": "o-999"})
+```
+
+The combination `w:"majority", j:True` is the strongest practical guarantee:
+the write has been committed to the journal of at least 2 voting nodes. Even if
+one of those nodes dies immediately after the ack, the write is durable on the
+survivors.
+
+## Read concerns
+
+A read concern controls the **consistency** of data returned by a read
+operation: how "real" is what you're seeing?
+
+MongoDB provides four levels:
+
+### local (default)
+
+Returns the most recent data on the node being queried, without any guarantee
+it has been replicated to other nodes. If you read from a secondary and that
+secondary fails before replicating the data to others, the data you read might
+"disappear" from the cluster's perspective — it was on a node that became the
+stale minority in a rollback.
+
+```python
+col.find_one({"_id": doc_id}, session=None)
+# equivalent to:
+col.with_options(read_concern=ReadConcern("local")).find_one({"_id": doc_id})
+```
+
+### majority
+
+Returns only data that has been acknowledged by a majority of voting nodes —
+in other words, data that is committed and durable per the same standard as
+`w:"majority"`. Reads from a secondary with `majority` concern won't return
+data that might be rolled back during a failover.
+
+This is the read level to use when you need monotonic reads and don't want to
+see speculative data that might be retracted.
+
+### linearizable
+
+The strongest and slowest guarantee. A read with `linearizable` concern
+reflects all writes that completed (returned to the application) before the
+read was initiated, **even if those writes happened on a different node**.
+
+Linearizable reads are synchronous: MongoDB must confirm it is still the
+primary before returning data, which involves a round-trip to a quorum of
+voting nodes. This adds latency proportional to your network round-trip time.
+
+<Callout type="insight" title="Linearizable is for distributed locks, not everyday reads">
+  The canonical use case: an idempotent distributed lock. You want to read the
+  current lock holder and guarantee you're seeing the absolute latest state,
+  not a majority-acknowledged snapshot that might be a few milliseconds stale.
+  For this you need `linearizable`. For reading a user's profile or order
+  history, you don't — `majority` is sufficient and far cheaper.
+</Callout>
+
+### snapshot
+
+Used inside multi-document transactions. The read sees a consistent snapshot
+of the data as of the transaction's start time — a classic MVCC snapshot
+isolation guarantee. Outside of a transaction context, `snapshot` is equivalent
+to `majority` for practical purposes.
+
+## Putting it together: the durability matrix
+
+The combination of write concern and read concern determines the end-to-end
+consistency guarantee of a write-then-read cycle:
+
+| Write concern | Read concern | Guarantee |
+|---------------|--------------|-----------|
+| `w:1, j:false` | `local` | Minimum — acknowledged in memory, read from local state |
+| `w:1, j:true` | `local` | Write survives crash on primary; read may see un-replicated data |
+| `w:"majority"` | `majority` | Committed writes only, on both sides — standard production baseline |
+| `w:"majority", j:true` | `linearizable` | Full linearizability — pay the latency |
+
+<Callout type="note" title="Multi-document transactions add another constraint">
+  Multi-document transactions (available since MongoDB 4.0) have their own
+  write concern at commit time and use `snapshot` read concern within the
+  transaction. The same w/j settings apply at commit. A transaction committed
+  with `w:"majority", j:true` is as durable as any other majority write.
+  Transactions do not make single-document writes weaker.
+</Callout>
+
+## The w:1 edge case that bites
+
+There is a subtle edge case in `w:"majority"` that becomes `w:1` automatically:
+when the number of data-bearing nodes is less than or equal to the voting
+majority threshold, MongoDB cannot satisfy `w:"majority"` with more than one
+node, so it effectively reduces to the primary's acknowledgement only. This
+happens in a 2-node PSA (primary-secondary-arbiter) topology: the arbiter
+votes but holds no data, so the voting majority of 2 can be satisfied by the
+primary alone.
+
+If you're running PSA and care about durability, this is a reason to prefer a
+3-node PSS (primary-secondary-secondary) topology instead, where `w:"majority"`
+genuinely means 2 data-bearing nodes.
+
+## PyMongo configuration
+
+```python
+from pymongo import MongoClient, WriteConcern
+from pymongo.read_concern import ReadConcern
+
+# High-durability client for financial operations
+client = MongoClient(
+    "mongodb://host1,host2,host3/?replicaSet=rs0",
+    w="majority",
+    j=True,
+    wtimeout=5000,       # don't wait forever for majority ack
+    readConcernLevel="majority",
+)
+
+# Override on a specific collection for linearizable lock reads
+lock_col = client.mydb.locks.with_options(
+    read_concern=ReadConcern("linearizable")
+)
+```
+
+`wtimeout` is important in production: if a majority of voting nodes is
+unavailable, the write will hang indefinitely without it. A timeout of 5–10
+seconds lets your application fail fast and retry rather than holding a
+connection open.
+
+> `w:"majority"` is a promise that a majority of **voting** nodes have
+> acknowledged the write. `j:true` is a promise that it survived to the journal
+> on those nodes. Together they're the production durability baseline. Know
+> which nodes are voting, and you know exactly what you're buying.

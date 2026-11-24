@@ -1,0 +1,206 @@
+---
+title: "Replica sets & elections"
+subtitle: "A replica set is a consensus system wearing a database's clothes. The election algorithm is what separates 10 seconds of downtime from 10 minutes."
+description: "How heartbeats work, the pv1 election protocol, the pre-vote phase, what happens second-by-second when a primary dies, and what retryable writes actually cover."
+level: "Intermediate · High Availability"
+accent: "#13AA52"
+readingTime: "15 min read"
+updated: 2026-11-24
+order: 55
+series: "MongoDB"
+part: 4
+---
+
+import Callout from '../../components/Callout.astro';
+
+*MongoDB deep-dive · Part 4 of 10. Previous: [Write concerns & read concerns](/mongodb-03-write-read-concerns/). Next: [Read preferences](/mongodb-05-read-preferences/).*
+
+A MongoDB replica set is a group of `mongod` instances that maintain the same
+dataset. One is the primary, the rest are secondaries. Data written to the
+primary replicates to secondaries via the oplog. If the primary becomes
+unavailable, the remaining nodes elect a new one — and that election is the
+thing worth understanding, because how fast it completes and what your
+application does during it determines whether a failure is "transparent" or "an
+outage."
+
+## The oplog
+
+Every write to a MongoDB primary is recorded in the **oplog** (operations log),
+a capped collection in the `local` database (`local.oplog.rs`). It's a logical
+record of mutations in idempotent form: `{op: "i", ns: "mydb.orders", o: {...}}`
+for an insert, `{op: "u", ...}` for an update, and so on.
+
+Secondaries tail the primary's oplog and replay operations in order. This is how
+replication works at the lowest level. The oplog is capped by size (configurable;
+default: 5% of free disk space or 50GB, whichever is smaller). When the oplog
+wraps around, secondaries that have fallen too far behind can no longer replicate
+— they become **stale** and must resync from scratch.
+
+## Heartbeats
+
+Members of a replica set send heartbeat requests to each other every 2 seconds
+(the `heartbeatIntervalMillis` default). Each heartbeat is a lightweight ping
+that checks liveness and exchanges state: `{replSetHeartbeat: 1, ...}`.
+
+If a member receives no heartbeat response from the primary within
+`electionTimeoutMillis` (default: 10 seconds), it considers the primary
+unavailable and starts the election process — but only after the pre-vote phase.
+
+## The pv1 election protocol
+
+MongoDB has used **protocol version 1** (pv1) since version 3.2. It's based on
+Raft, with some MongoDB-specific extensions. The key concepts:
+
+**Terms.** Every election increments a monotonically increasing term number.
+A node will not vote for a candidate from an earlier term. This prevents
+split-brain scenarios where an isolated old primary continues to accept writes.
+
+**Votes.** Each voting member can cast one vote per term. A candidate needs a
+majority of votes to be elected primary. In a 3-node set, that's 2.
+
+**Optime.** The candidate with the most recent oplog position (highest
+`optime`) in a given term is preferred. A node will not vote for a candidate
+whose oplog is less up-to-date than its own. This guarantees the new primary
+has all committed writes.
+
+## The pre-vote phase
+
+Before formally requesting votes and incrementing the term, a candidate
+initiates a **pre-vote** (called a "dry run" in the code). It asks other members:
+"Would you vote for me if I started an election?"
+
+If the candidate can't gather pre-vote approvals from a majority, it doesn't
+start the actual election and doesn't increment the term. This matters because
+term inflation — many failed elections each incrementing the term — causes
+existing primaries to step down unnecessarily (a node that sees a higher term
+than its own steps down). The pre-vote prevents a network-partitioned minority
+from disrupting an otherwise healthy majority.
+
+<Callout type="insight" title="The pre-vote prevents disruption by isolated nodes">
+  Without the pre-vote, a node isolated behind a network partition could keep
+  calling elections, incrementing the term with each attempt, and causing the
+  healthy majority to step down repeatedly. The pre-vote is a cheap check:
+  "Can I win? If not, don't even start."
+</Callout>
+
+## Second-by-second: what happens when the primary dies
+
+Here is the timeline of a primary failure and recovery:
+
+| Time | Event |
+|------|-------|
+| T+0 | Primary process crashes or becomes unreachable |
+| T+2 | Secondaries expect a heartbeat — none arrives |
+| T+10 | `electionTimeoutMillis` expires; secondaries consider the primary down |
+| T+10 | Eligible secondary initiates pre-vote; if majority approves, formal election begins |
+| T+10–12 | Candidate increments term, requests votes; majority votes for highest-optime candidate |
+| T+12 | New primary elected; writes the first no-op entry to its oplog to establish optime leadership |
+| T+12 | Drivers detect primary change via server discovery and monitoring (SDAM) |
+| T+12–13 | Application reads/writes reconnect to new primary |
+
+The window from T+0 to T+12 is roughly **10–15 seconds** in a default
+configuration. During this window, write operations fail with a `NotPrimary`
+error. This is what retryable writes are designed to bridge.
+
+<Callout type="note" title="Tuning electionTimeoutMillis">
+  You can lower `electionTimeoutMillis` for faster failover, but the lower bound
+  is constrained by your network's round-trip time and the heartbeat interval.
+  A setting below `2 * heartbeatIntervalMillis + max_network_RTT` will trigger
+  spurious elections. Most deployments leave it at 10s. If your network is
+  consistently fast and latency-sensitive, 5–6s is reasonable.
+</Callout>
+
+## Priority and elections
+
+Each replica set member has a `priority` (default: 1). Higher priority members
+are preferred as primary when their optime is otherwise equal. Setting a
+member's priority to 0 makes it ineligible to become primary — useful for
+secondaries in a distant data center that you want for disaster recovery but not
+for normal operation.
+
+Priority doesn't override optime: a high-priority member with a stale oplog
+will not be elected over a low-priority member with a fresh one.
+
+## Retryable writes
+
+MongoDB drivers (since 3.6) support **retryable writes**. When enabled, the
+driver automatically retries a write operation exactly once if it fails with
+a transient network error or a `NotPrimary` error — the conditions that occur
+during an election.
+
+```python
+from pymongo import MongoClient
+
+# Retryable writes are enabled by default in modern PyMongo
+client = MongoClient(
+    "mongodb://host1,host2,host3/?replicaSet=rs0",
+    retryWrites=True  # default; shown for clarity
+)
+
+col = client.mydb.orders
+
+# This insert will be retried once if the primary fails mid-election
+result = col.insert_one({"order_id": "o-100", "status": "pending"})
+```
+
+Retryable writes cover:
+- `insert_one`, `insert_many` (all documents as one batch)
+- `update_one`, `replace_one`
+- `delete_one`
+- Bulk write operations (each operation individually)
+- `find_one_and_*` operations
+
+<Callout type="gotcha" title="Retryable writes do not cover multi-document transactions">
+  Retryable writes handle individual write operations automatically. They do
+  **not** apply to multi-document transactions — a transaction commit that fails
+  during failover does not automatically retry. Your application must implement
+  an explicit retry loop around the entire transaction block:
+
+  ```python
+  def run_transaction(session):
+      with session.start_transaction():
+          orders.insert_one({"order_id": "o-200"}, session=session)
+          inventory.update_one({"item": "widget"}, {"$inc": {"qty": -1}},
+                                session=session)
+
+  with client.start_session() as session:
+      while True:
+          try:
+              run_transaction(session)
+              break
+          except Exception as e:
+              if e.has_error_label("TransientTransactionError"):
+                  continue   # retry the whole transaction
+              raise
+  ```
+
+  The `TransientTransactionError` label is set by the driver on errors that are
+  safe to retry in full.
+</Callout>
+
+## Arbiter nodes
+
+An arbiter is a replica set member with one job: voting. It holds no data and
+cannot become primary. Its purpose is to provide a tiebreaker in a 2-node set
+so that majority can be achieved (2 of 3 voting members, where the third is
+the arbiter).
+
+Arbiters are lightweight but come with trade-offs: a PSA topology (primary +
+secondary + arbiter) means your majority write concern (`w:"majority"`) reduces
+to requiring only the primary's journal acknowledgement in some edge cases, as
+described in [Part 3](/mongodb-03-write-read-concerns/). For most production
+workloads, a 3-node PSS is preferable.
+
+## Delayed members
+
+A secondary can be configured with `secondaryDelaySecs` — it replays the oplog
+with a time offset, effectively holding a delayed copy of the data. A
+30-minute delayed secondary gives you 30 minutes to catch an accidental mass
+delete before replication propagates it. Delayed members are almost always
+configured with `hidden: true` (invisible to the application) and `votes: 0`
+(to keep them out of election quorum calculations).
+
+> When the primary dies, the clock that matters is `electionTimeoutMillis`. At
+> 10 seconds, that's the gap your application must survive. Retryable writes
+> handle individual operations automatically. Multi-document transactions require
+> your own retry loop — the driver won't save you there.

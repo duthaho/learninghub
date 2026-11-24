@@ -1,0 +1,218 @@
+---
+title: "Backup & point-in-time recovery"
+subtitle: "A backup strategy is only as good as the last time you tested a restore. The technique matters, but the gaps — what your backup doesn't capture — matter more."
+description: "mongodump --oplog, mongorestore --oplogReplay and --oplogLimit, the index rebuild overhead, what logical backup misses vs filesystem snapshots, and the sharded-cluster caveat."
+level: "Advanced · Operations"
+accent: "#13AA52"
+readingTime: "14 min read"
+updated: 2026-11-24
+order: 60
+series: "MongoDB"
+part: 9
+---
+
+import Callout from '../../components/Callout.astro';
+
+*MongoDB deep-dive · Part 9 of 10. Previous: [Change streams & oplog tailing](/mongodb-08-change-streams/). Next: [Monitoring & security](/mongodb-10-monitoring/).*
+
+MongoDB backup is not a single switch. It's a decision tree: logical vs
+physical, replica member vs primary, oplog-augmented vs snapshot-only. Each
+combination has different recovery guarantees, different recovery speed, and
+different operational complexity. Getting this wrong shows up at the worst
+possible time — when you need to actually use the backup.
+
+## The two categories
+
+**Logical backup** (`mongodump`): exports documents and index definitions as
+BSON files. Portable across platforms and MongoDB versions (within limits).
+Works at the collection level. Can be augmented with the oplog to enable
+point-in-time recovery.
+
+**Physical backup** (filesystem snapshot — LVM snapshot, EBS snapshot, cloud
+disk snapshot): copies the raw WiredTiger data files at the filesystem level.
+Fast to create. Faster to restore. Captures internal engine state that
+`mongodump` cannot. Requires the snapshot to be taken while the data files are
+in a consistent state (either with the node stopped, or using WiredTiger's
+hot-backup API, or with `mongod --repair` after a crash).
+
+## mongodump with oplog
+
+A plain `mongodump` captures the state of the data at a point in time, but
+the dump takes time to run — during that time, writes continue to arrive. The
+dump contains documents from different moments in time within the same export.
+This is inconsistent, and it means you can't use it as a clean restore point.
+
+The `--oplog` flag fixes this:
+
+```bash
+mongodump \
+  --host "rs0/host1:27017,host2:27017,host3:27017" \
+  --oplog \
+  --out /backups/dump-$(date +%Y%m%d-%H%M%S)
+```
+
+With `--oplog`, `mongodump` captures the oplog entries that were generated
+during the dump. The output includes a file `oplog.bson` alongside the
+collection data. On restore, `mongorestore` can replay these oplog entries
+to bring all collections to a consistent point in time — the timestamp of
+the last oplog entry in the dump.
+
+<Callout type="note" title="--oplog requires running against a replica set, not a standalone">
+  `mongodump --oplog` works only against a replica set member. It reads the
+  oplog from the `local.oplog.rs` collection. Against a standalone `mongod`,
+  there is no oplog, and the flag is ignored (or errors, depending on version).
+  Always dump from a secondary to avoid adding read load to the primary.
+</Callout>
+
+## Point-in-time recovery with mongorestore
+
+The goal: restore to exactly 2 hours before a bad write. The process has two
+phases:
+
+### Phase 1: Restore the base dump
+
+```bash
+mongorestore \
+  --host "localhost:27017" \
+  --oplogReplay \
+  /backups/dump-20261124-020000
+```
+
+`--oplogReplay` tells `mongorestore` to replay the `oplog.bson` file after
+restoring the collection data. This brings everything to the consistent
+timestamp at the end of the dump.
+
+### Phase 2: Replay the live oplog up to the target timestamp
+
+After restoring the base dump, you replay the production replica set's oplog
+from the dump's end timestamp to the moment just before the bad write:
+
+```bash
+# Find the target timestamp (1 second before the bad write)
+# badwrite_ts is a BSON Timestamp — e.g., 1732492800 (Unix epoch)
+
+mongorestore \
+  --host "localhost:27017" \
+  --oplogReplay \
+  --oplogLimit "1732492800:1" \
+  --dir /backups/live-oplog-extract
+```
+
+`--oplogLimit "T:I"` stops replay at BSON Timestamp `{t: T, i: I}` — it
+replays all oplog entries with a timestamp strictly less than this value.
+Entries at exactly this timestamp are excluded, so you can target "just
+before the bad write" precisely.
+
+### Extracting live oplog entries
+
+To replay the live oplog, you first extract the entries in the time range from
+a secondary:
+
+```bash
+mongodump \
+  --host "rs0/host1:27017" \
+  --db local \
+  --collection oplog.rs \
+  --query '{"ts": {"$gte": {"$timestamp": {"t": DUMP_END_TS, "i": 1}}, "$lt": {"$timestamp": {"t": BAD_WRITE_TS, "i": 1}}}}' \
+  --out /backups/live-oplog-extract
+```
+
+Then rename the output file so `mongorestore --oplogReplay` recognises it:
+
+```bash
+mv /backups/live-oplog-extract/local/oplog.rs.bson \
+   /backups/live-oplog-extract/oplog.bson
+```
+
+<Callout type="insight" title="The full PITR workflow is: base dump + oplog replay up to target timestamp">
+  1. `mongodump --oplog` → consistent base snapshot with embedded oplog
+  2. `mongorestore --oplogReplay` → restore base snapshot to its end timestamp
+  3. Extract live oplog entries covering the gap from dump end to target time
+  4. `mongorestore --oplogReplay --oplogLimit T:I` → replay to just before the bad write
+
+  You now have the dataset as it existed 2 hours before the bad write.
+</Callout>
+
+## What mongodump doesn't capture
+
+`mongodump` captures:
+- All collection documents (BSON)
+- Index definitions (in `.metadata.json` files)
+- Collection options and validation rules
+
+`mongodump` does **not** capture:
+- In-flight transactions at snapshot time
+- WiredTiger internal state (checkpoints, journal entries)
+- The in-memory state of the storage engine
+
+<Callout type="gotcha" title="Index definitions are captured — but indexes must be rebuilt on restore">
+  `mongodump` saves index definitions in `.metadata.json`. `mongorestore`
+  reads these and recreates the indexes. But **recreating an index requires
+  a full rebuild** — the entire collection is scanned and the B-tree is
+  constructed from scratch. On a large collection (hundreds of millions of
+  documents), this rebuild can take hours and is I/O-intensive.
+
+  A filesystem snapshot avoids this entirely: the WiredTiger data files
+  include the already-built B-tree structures. After a snapshot restore,
+  indexes are ready immediately. No rebuild. This is the operational
+  difference between logical and physical backup for large datasets.
+</Callout>
+
+## Filesystem snapshots
+
+The alternative to `mongodump` is a filesystem-level snapshot: LVM snapshot,
+EBS snapshot, cloud disk snapshot. The workflow:
+
+1. Run `db.fsyncLock()` to flush and lock the data files (or use a secondary
+   that is already stopped, or use MongoDB's hot backup API for Atlas).
+2. Take the snapshot at the filesystem/block device level.
+3. Run `db.fsyncUnlock()` to resume writes.
+
+The result is a byte-for-byte copy of the WiredTiger data directory at a
+consistent point. Restoration is a file copy — far faster than rebuilding
+indexes from a logical dump.
+
+The trade-off: snapshots are not portable across platforms and are tied to
+the underlying block storage. You can't use a snapshot to restore on a
+different OS or storage type. For disaster recovery across data centres or
+cloud regions, `mongodump` is still the portable option.
+
+## The sharded cluster caveat
+
+`mongodump --oplog` does **not** work on a sharded cluster at the mongos
+level. The `--oplogReplay` flag is not supported when connecting through
+mongos.
+
+For a sharded cluster, you must either:
+- Dump each shard individually (connecting directly to each shard's replica
+  set) and coordinate timestamps across shards — complex.
+- Use MongoDB Ops Manager or Atlas Backup (commercial), which handles the
+  coordination automatically.
+- Use Percona Backup for MongoDB (PBM) — an open-source tool that handles
+  multi-shard consistent logical backup.
+
+<Callout type="gotcha" title="A single-command sharded cluster backup does not exist with open-source tools">
+  If you're running a sharded cluster and you've been using a single
+  `mongodump --host mongos-host` without `--oplog`, you don't have a
+  consistent backup — you have a collection of documents from different
+  moments in time. Use PBM or Ops Manager for sharded clusters.
+</Callout>
+
+## Backup checklist
+
+| Requirement | Use |
+|-------------|-----|
+| Portable, logical backup with PITR | `mongodump --oplog` + oplog replay |
+| Fast restore, large dataset | Filesystem snapshot |
+| No index rebuild overhead | Filesystem snapshot |
+| Sharded cluster consistent backup | PBM or Atlas Backup |
+| Cross-platform restore | `mongodump` |
+| Test restore periodically | Required regardless of method |
+
+The last row is the most important. A backup you've never restored is an
+assumption, not a guarantee.
+
+> `mongodump --oplog` gives you a consistent base point and the oplog entries
+> to advance to any moment up to the dump end. `--oplogReplay --oplogLimit`
+> gives you surgical control over where you stop. For large datasets, the
+> index rebuild is the hidden cost — filesystem snapshots sidestep it entirely.

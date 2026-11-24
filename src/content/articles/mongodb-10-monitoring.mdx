@@ -1,0 +1,269 @@
+---
+title: "Monitoring & security hardening"
+subtitle: "An unmonitored MongoDB cluster is a cluster where you find out about problems from your users. The four signals and minimum-privilege RBAC cover the other path."
+description: "The four latency-spike signals, $currentOp vs the deprecated command, the database profiler, WiredTiger cache eviction, and minimum-privilege RBAC for a Python service."
+level: "Advanced · Operations"
+accent: "#13AA52"
+readingTime: "15 min read"
+updated: 2026-11-24
+order: 61
+series: "MongoDB"
+part: 10
+---
+
+import Callout from '../../components/Callout.astro';
+
+*MongoDB deep-dive · Part 10 of 10. Previous: [Backup & point-in-time recovery](/mongodb-09-backup/).*
+
+Monitoring and security are both about surface area: monitoring tells you
+which part of the system is behaving unexpectedly, and security limits which
+parts of the system any given identity can reach. Neither is a one-time
+configuration — both require understanding the signals well enough to act on
+them and the access model well enough to tighten it.
+
+## The four signals to check when latency spikes
+
+When a MongoDB node's read or write latency suddenly increases, there are four
+places to look in order:
+
+### 1. Current operations ($currentOp)
+
+The first question is: what is the database doing right now?
+
+```python
+# $currentOp aggregation stage — preferred since MongoDB 6.2
+result = list(client.admin.aggregate([
+    {"$currentOp": {"allUsers": True, "idleSessions": False}},
+    {"$match": {"secs_running": {"$gt": 5}}},  # ops running > 5 seconds
+    {"$project": {"opid": 1, "op": 1, "ns": 1, "secs_running": 1,
+                  "planSummary": 1, "client": 1}},
+]))
+
+for op in result:
+    print(op)
+```
+
+<Callout type="note" title="Use $currentOp aggregation, not the currentOp command">
+  The `db.currentOp()` shell helper and the `currentOp` command were deprecated
+  in MongoDB 6.2 in favour of the `$currentOp` aggregation stage. The stage
+  gives you the full power of the aggregation pipeline to filter and project —
+  for example, filtering by `secs_running` or `ns` directly in the query rather
+  than post-processing the result. Use `$currentOp` in new code.
+</Callout>
+
+Look for long-running operations (`secs_running > 5` is a good starting
+threshold), operations doing COLLSCAN (`planSummary: "COLLSCAN"`), and
+operations holding locks (`waitingForLock: true`). A single runaway query
+can block everything behind it if it holds a collection lock.
+
+To kill a problem operation:
+
+```python
+client.admin.command("killOp", op=12345)  # opid from $currentOp output
+```
+
+### 2. Slow query log / database profiler
+
+The profiler records operations that exceed `slowOpThresholdMs` (default:
+100ms) to the `system.profile` collection:
+
+```python
+# Enable profiling for ops > 50ms on a specific database
+db.set_profiling_level(1, slow_ms=50)
+
+# Check recent slow queries
+slow = list(db.system.profile.find().sort("ts", -1).limit(20))
+for op in slow:
+    print(f"{op['op']:8} {op['millis']:5}ms  {op.get('planSummary','?'):30}  {op['ns']}")
+```
+
+The profiler output includes `planSummary` (which plan was used), `millis`
+(total time), `keysExamined`, `docsExamined`, and `nreturned` — the same
+metrics as `explain("executionStats")`, but for operations that already ran.
+
+<Callout type="gotcha" title="Leave the profiler at level 1 (slow ops only) in production">
+  Profiling level 2 records ALL operations to `system.profile`. On a
+  write-heavy cluster, this creates a feedback loop: the profiling writes
+  themselves are logged, which creates more writes. Level 1 (slow ops only)
+  gives you the signal you need without the overhead.
+</Callout>
+
+### 3. Replication lag
+
+Replication lag is the delay between when a write is committed on the primary
+and when it's replicated to a secondary. High lag means secondaries are
+serving stale data ([Part 5](/mongodb-05-read-preferences/)) and that your
+recovery window for failover is wider than expected.
+
+```python
+repl_status = client.admin.command("replSetGetStatus")
+for member in repl_status["members"]:
+    if member["state"] == 2:  # 2 = SECONDARY
+        # optime difference in seconds
+        primary_optime = max(
+            m["optimeDate"] for m in repl_status["members"]
+            if m["state"] == 1
+        )
+        lag = (primary_optime - member["optimeDate"]).total_seconds()
+        print(f"{member['name']:30}  lag: {lag:.1f}s")
+```
+
+Alert when lag exceeds your oplog window divided by some safety factor (e.g.,
+alert at 10% of the oplog window). If lag is rising, the common causes are:
+high write throughput exceeding replication capacity, a secondary with
+degraded I/O, or a secondary processing a long-running background operation.
+
+### 4. WiredTiger cache eviction
+
+WiredTiger (MongoDB's storage engine since 3.2) maintains a cache of hot data
+in RAM. When the cache is full, it evicts pages to free space. Normal
+background eviction is fine. **Application-thread eviction** — where the
+threads serving your queries are also doing eviction work — kills latency.
+
+```python
+server_status = client.admin.command("serverStatus")
+wt_cache = server_status["wiredTiger"]["cache"]
+
+cache_bytes_in_use = wt_cache["bytes currently in the cache"]
+cache_bytes_max    = wt_cache["maximum bytes configured"]
+cache_pct          = cache_bytes_in_use / cache_bytes_max * 100
+
+eviction_server    = wt_cache["eviction server evictions"]
+eviction_app       = wt_cache["application threads page eviction attempts"]
+
+print(f"Cache utilisation:  {cache_pct:.1f}%")
+print(f"Server evictions:   {eviction_server}")
+print(f"App thread evictions: {eviction_app}")
+```
+
+If `application threads page eviction attempts` is non-zero and rising, your
+working set exceeds your cache. Options: add RAM, reduce the working set
+(better indexes so less data is loaded), or scale to more shards.
+
+<Callout type="insight" title="Application-thread eviction is the latency cliff">
+  Background eviction keeps the cache healthy. Application-thread eviction
+  happens when background eviction can't keep up and query threads are
+  forced to do eviction work inline — while the client is waiting for the
+  response. It shows up as sudden, unexplained latency spikes that don't
+  correlate with query counts. `application threads page eviction attempts`
+  going non-zero is the diagnostic signature.
+</Callout>
+
+## Security: RBAC for a Python service
+
+MongoDB's Role-Based Access Control (RBAC) system lets you define roles with
+exactly the privileges a service needs — nothing more.
+
+### Principle of least privilege
+
+A Python service that only reads from one collection should not have `read`
+access to the entire database, and absolutely should not have `readWrite`,
+`dbAdmin`, or any cluster-level role. It should have exactly:
+- `find` action on the specific collection it reads
+- Optionally, `listCollections` if it needs to introspect the collection list
+
+### Creating a minimum-privilege role
+
+```javascript
+// In the mongo shell or via db.command()
+db.createRole({
+    role: "orderReader",
+    privileges: [
+        {
+            resource: {db: "mydb", collection: "orders"},
+            actions: ["find"]
+        }
+    ],
+    roles: []  // inherit nothing
+})
+
+db.createUser({
+    user: "order_service",
+    pwd: "...",
+    roles: [
+        {role: "orderReader", db: "mydb"}
+    ]
+})
+```
+
+In PyMongo:
+
+```python
+db.command("createRole", "orderReader",
+    privileges=[{
+        "resource": {"db": "mydb", "collection": "orders"},
+        "actions": ["find"],
+    }],
+    roles=[],
+)
+
+db.command("createUser", "order_service",
+    pwd="...",
+    roles=[{"role": "orderReader", "db": "mydb"}],
+)
+```
+
+<Callout type="insight" title="Custom roles > built-in roles for application accounts">
+  MongoDB's built-in `read` role grants `find` on all current and future
+  collections in a database. A custom role pinned to one collection grants
+  `find` on exactly that collection. When a misconfigured query hits the
+  wrong collection by accident, the built-in `read` role silently allows it;
+  the custom role rejects it. The error is a gift: it tells you something
+  unexpected is happening.
+</Callout>
+
+### Transport encryption and auth mechanism
+
+Always require TLS for client connections. Never deploy MongoDB without
+authentication enabled. For Python services, the recommended auth mechanism
+is SCRAM-SHA-256 (default since MongoDB 4.0):
+
+```python
+client = MongoClient(
+    "mongodb://order_service:password@host1:27017/mydb"
+    "?authSource=mydb"
+    "&authMechanism=SCRAM-SHA-256"
+    "&tls=true"
+    "&tlsCAFile=/etc/ssl/mongo-ca.pem"
+)
+```
+
+### Audit logging
+
+For compliance workloads, MongoDB Enterprise (and Atlas) support audit logging
+— a record of every operation, including authentication events, privilege
+changes, and read/write access. Configure it in `mongod.conf`:
+
+```yaml
+auditLog:
+  destination: file
+  format: JSON
+  path: /var/log/mongodb/audit.json
+  filter: '{"atype": {"$in": ["authenticate", "createCollection", "dropCollection"]}}'
+```
+
+The `filter` field takes a query expression — log only the event types you
+care about to keep the audit log manageable.
+
+## Putting the signals together: a runbook
+
+When latency spikes:
+
+1. **`$currentOp`** — is there a long-running operation? Kill it if appropriate.
+2. **`system.profile`** — have there been slow queries in the last 5 minutes?
+   What's their `planSummary`? A `COLLSCAN` points to a missing index.
+3. **Replication lag** — is a secondary falling behind? Check its I/O and CPU.
+4. **WiredTiger cache** — is `application threads page eviction` non-zero?
+   If yes, working set > cache.
+5. **Connections** — `serverStatus().connections.current` near the limit
+   indicates connection pool exhaustion; check application connection pool
+   config.
+
+Each signal narrows the search. In practice, the cause is usually one of:
+a missing index triggering a COLLSCAN, a runaway aggregation, a secondary with
+disk pressure causing lag, or a cache working set that grew beyond RAM.
+
+> Security and observability are both about surface area. Minimum-privilege
+> RBAC limits the blast radius of any single account compromise. The four-signal
+> runbook limits the time you spend in the dark when something goes wrong.
+> Both are built once and paid for every day you run in production.

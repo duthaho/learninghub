@@ -1,0 +1,179 @@
+---
+title: "Read preferences"
+subtitle: "Where you read from is a throughput decision, a consistency decision, and a latency decision simultaneously. The five modes give you the dial."
+description: "The five read preference modes, maxStalenessSeconds and its 90-second floor, the read-your-own-writes trap with nearest, and Python configuration for each scenario."
+level: "Intermediate · Consistency"
+accent: "#13AA52"
+readingTime: "13 min read"
+updated: 2026-11-24
+order: 56
+series: "MongoDB"
+part: 5
+---
+
+import Callout from '../../components/Callout.astro';
+
+*MongoDB deep-dive · Part 5 of 10. Previous: [Replica sets & elections](/mongodb-04-replica-sets/). Next: [Aggregation pipeline](/mongodb-06-aggregation/).*
+
+A MongoDB replica set has one primary and one or more secondaries. Writes must
+go to the primary. Reads can go anywhere — that's where the choice begins.
+Your read preference tells the driver which node(s) are acceptable for a given
+read operation.
+
+The choice is not purely about performance. It's also about consistency: a
+secondary may lag the primary by anywhere from milliseconds to seconds (or
+more). Reading from a secondary can return data that the primary has already
+superseded. Whether that matters depends entirely on what the read is for.
+
+## The five modes
+
+### primary (default)
+
+All reads go to the primary. The only mode that guarantees you'll see the latest
+committed writes. No stale reads possible, but no scale-out for reads either.
+
+```python
+from pymongo import MongoClient, ReadPreference
+
+client = MongoClient(
+    "mongodb://host1,host2,host3/?replicaSet=rs0",
+    readPreference="primary"  # default
+)
+```
+
+**Use for:** any read where staleness is unacceptable — e.g., reading a record
+immediately after writing it, reading data that drives a downstream write.
+
+### primaryPreferred
+
+Reads go to the primary when it's available; fall back to a secondary if the
+primary is unreachable. This is the "best effort primary" mode.
+
+**Use for:** read-heavy workloads where you want primary consistency normally
+but don't want reads to fail during a failover window.
+
+### secondary
+
+All reads go to a secondary (chosen according to driver tag sets or latency
+window). Never reads from the primary.
+
+**Use for:** analytics, reporting, batch jobs — workloads that can tolerate
+stale data and that you want to offload from the primary.
+
+### secondaryPreferred
+
+Reads go to a secondary when any secondary is available; falls back to the
+primary when no secondaries are reachable.
+
+**Use for:** the most common scale-out pattern for read-heavy applications.
+You accept mild staleness in exchange for distributing read load.
+
+### nearest
+
+Reads go to the member with the lowest network latency, regardless of whether
+it's a primary or secondary. The driver measures round-trip times in its
+server monitoring loop and routes to the fastest node.
+
+**Use for:** globally distributed deployments where latency is the primary
+concern and you're willing to accept reads from any member.
+
+<Callout type="gotcha" title="nearest breaks read-your-own-writes">
+  With `nearest`, a read issued right after a write may land on a secondary that
+  hasn't replicated the write yet — you wrote to the primary (necessarily), but
+  the fastest node in your latency measurement might be a secondary that is a
+  few hundred milliseconds behind. The user clicks "save," the page refreshes,
+  and the saved data appears to have vanished — it's on the primary but not yet
+  on the secondary they just read from.
+
+  The fix is to use `nearest` only for reads where stale data is tolerable, and
+  to route reads that follow writes to `primary` or `primaryPreferred`.
+</Callout>
+
+## maxStalenessSeconds
+
+When using `secondary`, `secondaryPreferred`, or `nearest`, you can set a
+bound on how stale the secondary's data may be:
+
+```python
+from pymongo.read_preferences import Secondary
+
+col = client.mydb.events.with_options(
+    read_preference=Secondary(max_staleness=120)  # seconds
+)
+```
+
+The driver will exclude any secondary whose estimated lag from the primary
+exceeds `maxStalenessSeconds`. If all secondaries exceed the bound, the
+operation falls back to the primary (for `secondaryPreferred`/`nearest`) or
+raises an error (for `secondary`).
+
+<Callout type="gotcha" title="maxStalenessSeconds has a hard floor of 90 seconds">
+  You cannot set `maxStalenessSeconds` below **90 seconds**. The driver will
+  raise an error if you try. The floor exists because the staleness estimate
+  is computed from heartbeat data, and heartbeats fire every 10 seconds — the
+  estimate has inherent imprecision that makes sub-90-second enforcement
+  unreliable. If you need sub-second consistency guarantees, use `primary` read
+  preference, not a low `maxStalenessSeconds`.
+</Callout>
+
+## Tag sets
+
+Tag sets let you route reads to specific secondaries based on custom metadata.
+You configure tags in `rs.conf()`:
+
+```javascript
+// In the mongo shell, label one secondary as "analytics"
+cfg = rs.conf()
+cfg.members[1].tags = { "purpose": "analytics" }
+rs.reconfig(cfg)
+```
+
+Then route specific operations to it:
+
+```python
+from pymongo.read_preferences import Secondary
+
+analytics_col = client.mydb.events.with_options(
+    read_preference=Secondary(tag_sets=[{"purpose": "analytics"}])
+)
+
+# This read goes only to the "analytics"-tagged secondary
+cursor = analytics_col.find({"ts": {"$gte": t_start}})
+```
+
+Tag sets are powerful for multi-region topologies: tag secondaries by region
+and route application reads to the local region's secondary, with a fallback
+to the primary if the local secondary is unavailable.
+
+## Choosing the right mode: a decision matrix
+
+| Scenario | Recommended mode | Reason |
+|----------|-----------------|--------|
+| Read after write (same user session) | `primary` | No stale reads possible |
+| High-read-throughput CRUD app | `secondaryPreferred` | Distribute load; mild staleness OK |
+| Analytics / reporting | `secondary` | Offload primary completely |
+| Multi-region, latency-sensitive | `nearest` with tag sets | Route by geography; staleness tolerable |
+| Failover resilience for reads | `primaryPreferred` | Primary when healthy, secondary on failover |
+
+## Combining read preference with sessions (RYOW)
+
+MongoDB provides **read-your-own-writes (RYOW)** consistency automatically
+when using a **causal consistency session** with `primary` or
+`primaryPreferred` read preference:
+
+```python
+with client.start_session() as session:
+    session.start_transaction()
+    # writes here...
+    # reads in the same session on primary will see those writes
+```
+
+For non-transaction use cases, the simplest guarantee of read-your-own-writes
+is `primary` read preference, full stop. If you need to read from a secondary
+after a write in the same workflow, you need either a causal session or an
+explicit wait for replication — there's no shortcut.
+
+> `secondaryPreferred` buys read throughput. `nearest` buys latency. Neither
+> buys consistency. When you write and then read in the same user flow, use
+> `primary` or `primaryPreferred` — anything else risks showing the user a
+> stale world.

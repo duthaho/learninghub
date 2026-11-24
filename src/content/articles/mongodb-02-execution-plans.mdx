@@ -1,0 +1,246 @@
+---
+title: "Reading execution plans"
+subtitle: "explain() is a conversation — MongoDB shows you exactly what it did and why. Most people read the wrong line."
+description: "Anatomy of explain() output, the nReturned vs totalDocsExamined ratio, what FETCH and SORT stages mean, and how to tell a healthy plan from a slow one."
+level: "Intermediate · Performance"
+accent: "#13AA52"
+readingTime: "13 min read"
+updated: 2026-11-24
+order: 53
+series: "MongoDB"
+part: 2
+---
+
+import Callout from '../../components/Callout.astro';
+
+*MongoDB deep-dive · Part 2 of 10. Previous: [Indexes in depth](/mongodb-01-indexes/). Next: [Write concerns & read concerns](/mongodb-03-write-read-concerns/).*
+
+If [Part 1](/mongodb-01-indexes/) is about placing the right bet, this part is
+about reading the receipts. `explain()` is MongoDB's way of showing you what
+plan it chose, what every stage of that plan cost, and where the work actually
+happened. The numbers are dense if you approach them without a framework. With
+one, they're immediately legible.
+
+## The three verbosity modes
+
+```python
+# Just the winning plan — no execution stats
+col.find(query).explain()
+
+# Winning plan + how much work was done
+col.find(query).explain("executionStats")
+
+# All candidate plans + their stats (expensive — not for production)
+col.find(query).explain("allPlansExecution")
+```
+
+`"executionStats"` is what you want 95% of the time. It tells you what the
+planner chose and how much it cost to execute. `"allPlansExecution"` is useful
+when you suspect the planner is picking the wrong index — it shows you the
+plans that lost and why.
+
+## The key numbers
+
+When you call `.explain("executionStats")`, the top-level `executionStats`
+object contains the numbers that matter:
+
+| Field | What it means |
+|-------|---------------|
+| `nReturned` | Documents returned to the application |
+| `totalKeysExamined` | Index entries scanned |
+| `totalDocsExamined` | Full documents loaded from the collection |
+| `executionTimeMillis` | Total wall-clock time for the query |
+
+The ratio to watch: `totalDocsExamined / nReturned`. A ratio of 1 is ideal —
+you loaded exactly the documents you returned. A ratio of 1000 means you
+inspected 1000 documents to return 1. This is the signal for a missing or
+mismatched index, or a predicate that can't use an index at all.
+
+<Callout type="insight" title="totalDocsExamined = 0 means the query is covered">
+  When `totalDocsExamined` is `0` and `nReturned` is non-zero, MongoDB answered
+  the query entirely from the index — no documents were loaded. This is the
+  covered-query signature from [Part 1](/mongodb-01-indexes/). It's the
+  gold standard for read-heavy paths.
+</Callout>
+
+## Reading the winning plan tree
+
+The `winningPlan` is a tree of stages. Each stage has a `stage` field (what
+it did) and optionally an `inputStage` (what fed it). Read from the innermost
+stage outward — that's the execution order.
+
+```json
+{
+  "winningPlan": {
+    "stage": "FETCH",
+    "inputStage": {
+      "stage": "IXSCAN",
+      "keyPattern": {"user_id": 1, "status": 1},
+      "indexBounds": {
+        "user_id": ["[\"u-42\", \"u-42\"]"],
+        "status": ["[\"active\", \"active\"]"]
+      }
+    }
+  }
+}
+```
+
+This plan reads: `IXSCAN` (walk the index for matching keys) → `FETCH` (load
+the full documents for those keys). The innermost stage always executes first.
+
+### Stage vocabulary
+
+| Stage | Meaning |
+|-------|---------|
+| `COLLSCAN` | Full collection scan — no usable index |
+| `IXSCAN` | Index scan — walking the B-tree |
+| `FETCH` | Load full documents from the collection |
+| `SORT` | In-memory (or on-disk) sort — index couldn't satisfy `.sort()` |
+| `SORT_MERGE` | Merge multiple sorted index scans |
+| `PROJECTION_COVERED` | Projection served from index (no FETCH) |
+| `LIMIT` | Apply a `.limit()` |
+| `SKIP` | Apply a `.skip()` |
+
+## What FETCH means and when it's unavoidable
+
+`FETCH` appears when the index can narrow down the candidates but the query
+projection needs a field that isn't in the index. MongoDB has no choice but to
+load the full document to retrieve that field.
+
+FETCH is **not inherently bad**. If you're returning a large projection of
+non-indexed fields, FETCH is the right behaviour. It's only a problem when
+the index scan produces many candidates that then require a FETCH, but most
+of those candidates are filtered out *after* the fetch by predicates on
+non-indexed fields. That pattern — IXSCAN producing 10,000 candidates, FETCH
+loading 10,000 documents, only 50 surviving a final filter — is what explodes
+`totalDocsExamined`.
+
+The fix is usually one of:
+1. Extend the compound index to include the filtered field (push the predicate
+   into the index scan).
+2. If the projection only needs indexed fields, exclude `_id` to achieve a
+   covered query.
+
+## What SORT means and when to worry
+
+`SORT` appears in the winning plan when the query has a `.sort()` clause that
+the index cannot satisfy. MongoDB has to load all matching documents, hold them
+in a sort buffer in RAM, sort them, then return them.
+
+The in-memory sort buffer default is **100 MB**. If the sort working set
+exceeds that, MongoDB either rejects the operation with an error or spills to
+disk (depending on configuration). Either way, it's slow.
+
+<Callout type="gotcha" title="A SORT stage isn't always caused by a missing index">
+  The most common cause of SORT is an ESR violation — the sort field is in the
+  compound index, but it's placed before or after a range field rather than
+  between the equality and range fields. The index exists, it's being used for
+  the predicate, but its key order doesn't align with the sort direction. See
+  [Part 1](/mongodb-01-indexes/) for the ESR fix.
+</Callout>
+
+## A worked example: diagnosing a slow query
+
+Say you're seeing 300ms queries on this:
+
+```python
+db.orders.find(
+    {"customer_id": "c-100", "ts": {"$gte": t_start, "$lte": t_end}},
+    {"amount": 1, "status": 1}
+).sort("amount", -1)
+```
+
+You run:
+
+```python
+plan = db.orders.find(
+    {"customer_id": "c-100", "ts": {"$gte": t_start, "$lte": t_end}},
+    {"amount": 1, "status": 1}
+).sort("amount", -1).explain("executionStats")
+
+stats = plan["executionStats"]
+print(f"nReturned:          {stats['nReturned']}")
+print(f"totalDocsExamined:  {stats['totalDocsExamined']}")
+print(f"totalKeysExamined:  {stats['totalKeysExamined']}")
+print(f"executionTimeMillis:{stats['executionTimeMillis']}")
+```
+
+Output:
+```
+nReturned:          48
+totalDocsExamined:  48
+totalKeysExamined:  48
+executionTimeMillis:287
+```
+
+The ratio is 1:1 — that's healthy. So the scan isn't the problem. You look at
+the winning plan:
+
+```json
+{
+  "winningPlan": {
+    "stage": "SORT",
+    "sortPattern": {"amount": -1},
+    "memUsage": 2048000,
+    "inputStage": {
+      "stage": "FETCH",
+      "inputStage": {
+        "stage": "IXSCAN",
+        "keyPattern": {"customer_id": 1, "ts": 1}
+      }
+    }
+  }
+}
+```
+
+There it is: `SORT` at the top. The index `{customer_id, ts}` exists and is
+being used for the equality and range predicates, but `amount` isn't in it, so
+the sort has nowhere to go. The fix is an ESR-ordered compound index:
+
+```python
+db.orders.create_index([
+    ("customer_id", ASCENDING),   # E — equality
+    ("amount", DESCENDING),        # S — sort field, matches sort direction
+    ("ts", ASCENDING),             # R — range
+])
+```
+
+After creating this index, the winning plan becomes `IXSCAN → FETCH` with no
+`SORT` stage. The sort is free — it falls out of the index order. Latency
+drops.
+
+## The SBE engine (MongoDB 8.0+)
+
+Since MongoDB 8.0, many queries are executed by the **Slot-Based Execution
+(SBE)** engine rather than the classic interpreter. When SBE is active, the
+`explain()` output gains a `slotBasedPlan` field under `queryPlanner`. The
+high-level stage vocabulary (`IXSCAN`, `FETCH`, `SORT`) is preserved, so your
+diagnostic workflow doesn't change. The difference is that SBE executes queries
+as compiled slot-passing programs rather than interpreted tree-walks, which
+reduces per-document overhead for filter-heavy queries.
+
+If you see `slotBasedPlan` in the output and your query falls into an SBE
+category, the execution times you're measuring already include the SBE speedup.
+You don't need to do anything differently — just be aware that benchmarks from
+MongoDB 7.x and earlier will show improvements on the same hardware once you
+upgrade.
+
+## Quick diagnostic checklist
+
+When a query is slow:
+
+1. Run `explain("executionStats")`.
+2. Check for `COLLSCAN` in the winning plan → missing index.
+3. Check `totalDocsExamined / nReturned` ratio → if >> 1, index is scanning too many candidates.
+4. Check for `SORT` stage → ESR violation or missing sort field in index.
+5. Check `totalDocsExamined` → if 0, query is covered (rarely the problem).
+6. If plan seems wrong, run `explain("allPlansExecution")` to see rejected plans.
+
+The two most common findings: a `COLLSCAN` on an unindexed field, and a `SORT`
+stage caused by an ESR violation. Together they cover the majority of
+query performance incidents.
+
+> `explain()` doesn't tell you what index to create — it tells you what work was
+> done without the right index. The question "why is this SORT stage here?" has
+> one answer 90% of the time: the sort field is not in the compound index, or
+> it's in the wrong position per ESR.

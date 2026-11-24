@@ -1,0 +1,265 @@
+---
+title: "Aggregation pipeline for ops"
+subtitle: "The pipeline is a data transformation assembly line. Each stage should do one thing — the mistakes happen when a stage tries to do everything."
+description: "$lookup, $group, $merge vs $out, the 100 MB per-stage RAM limit, allowDiskUse, and the right tool for nightly rebuilds vs incremental updates."
+level: "Intermediate · Data Processing"
+accent: "#13AA52"
+readingTime: "15 min read"
+updated: 2026-11-24
+order: 57
+series: "MongoDB"
+part: 6
+---
+
+import Callout from '../../components/Callout.astro';
+
+*MongoDB deep-dive · Part 6 of 10. Previous: [Read preferences](/mongodb-05-read-preferences/). Next: [Sharding architecture](/mongodb-07-sharding/).*
+
+MongoDB's aggregation pipeline is a sequence of stages, each of which
+transforms a stream of documents and passes the result to the next. The mental
+model is an assembly line: documents enter on the left, flow through each
+stage, and exit on the right as a transformed result. At every stage you're
+operating on the full stream of documents that the previous stage produced.
+
+This mental model has a direct performance implication: a stage that narrows
+the stream early makes every subsequent stage cheaper. Put `$match` and
+`$limit` as early as possible.
+
+## The core stages
+
+### $match
+
+Filter documents, like a `WHERE` clause. MongoDB pushes `$match` stages that
+appear early in the pipeline into the index scan, so a leading `$match` on an
+indexed field is essentially free — it uses the same mechanism as a `find()`
+query.
+
+```python
+pipeline = [
+    {"$match": {"status": "active", "region": "ap-southeast-1"}},
+    # ... remaining stages
+]
+```
+
+### $group
+
+Group documents and compute aggregates over each group, like `GROUP BY` in SQL.
+
+```python
+pipeline = [
+    {"$match": {"status": "active"}},
+    {"$group": {
+        "_id": "$customer_id",
+        "total_orders": {"$sum": 1},
+        "total_revenue": {"$sum": "$amount"},
+        "last_order": {"$max": "$ts"},
+    }},
+]
+```
+
+The `_id` field in `$group` is the grouping key (use `None` to aggregate over
+the whole collection).
+
+### $lookup
+
+A left-outer join between the current collection and another collection in the
+same database. Think `LEFT JOIN` in SQL.
+
+```python
+pipeline = [
+    {"$match": {"status": "active"}},
+    {"$lookup": {
+        "from": "customers",        # collection to join
+        "localField": "customer_id", # field in the current doc
+        "foreignField": "_id",       # field in the joined collection
+        "as": "customer",            # output array field name
+    }},
+    {"$unwind": "$customer"},        # flatten the array (inner join behaviour)
+]
+```
+
+<Callout type="note" title="$lookup is a join at query time — it has no index awareness by default">
+  For a `$lookup` to be efficient, the `foreignField` must be indexed in the
+  joined collection. Without an index, the lookup performs a full collection
+  scan for every input document. Add `{"from": "customers"}` and check that
+  `customers._id` (or whatever `foreignField` you use) is indexed. This is
+  the most common source of unexpectedly slow aggregations.
+</Callout>
+
+### $project and $addFields
+
+`$project` reshapes documents (include/exclude fields, rename, compute
+expressions). `$addFields` is `$project` without the exclusion semantics —
+it adds or overwrites fields while preserving everything else.
+
+### $sort and $limit
+
+`$sort` is expensive without an index to back it because it loads all documents
+into the sort buffer. When `$sort` immediately follows a `$match`, MongoDB can
+sometimes use an index to satisfy both, the same way a `.find().sort()` can.
+Always put `$limit` after `$sort` to minimise the number of documents flowing
+downstream.
+
+### $merge and $out
+
+Both stages write pipeline results to a collection. They're the difference
+between incremental updates and full replacement:
+
+- **`$out`** replaces the target collection entirely. It first writes results
+  to a temporary collection, then atomically renames it over the target. The
+  operation is atomic from the reader's perspective — a concurrent read sees
+  either the old data or the new data, never a partial write.
+- **`$merge`** merges results into an existing collection using a configurable
+  match key and merge behaviour. You can insert new documents, replace
+  existing ones, update them with pipeline expressions, or keep the existing
+  document and discard the new one.
+
+```python
+# Full nightly rebuild — $out is atomic and simple
+db.events.aggregate([
+    {"$match": {"ts": {"$gte": yesterday_start, "$lte": yesterday_end}}},
+    {"$group": {"_id": "$user_id", "event_count": {"$sum": 1}}},
+    {"$out": "daily_user_summary"},
+])
+
+# Incremental update — $merge preserves existing records
+db.events.aggregate([
+    {"$match": {"ts": {"$gte": hour_start, "$lte": hour_end}}},
+    {"$group": {"_id": "$user_id", "event_count": {"$sum": 1}}},
+    {"$merge": {
+        "into": "hourly_user_summary",
+        "on": "_id",
+        "whenMatched": "merge",   # update existing doc
+        "whenNotMatched": "insert", # insert if not present
+    }},
+])
+```
+
+<Callout type="insight" title="$out for nightly rebuilds, $merge for incremental updates">
+  `$out` is the right choice when you're rebuilding a summary from scratch
+  each run — it's atomic and leaves no orphaned records from a previous run.
+  `$merge` is the right choice when you're streaming incremental data into a
+  running aggregate — it preserves existing records and merges the new batch
+  in. Using `$out` for an incremental update would delete all previously
+  accumulated records not in the current batch. Using `$merge` for a full
+  rebuild would leave orphaned records from records that no longer exist in
+  the source.
+</Callout>
+
+## The 100 MB per-stage RAM limit
+
+Each pipeline stage has a **100 MB working memory limit** by default. If a
+single stage needs to hold more than 100 MB of documents in memory at once —
+for example, a `$group` that needs to accumulate all documents before
+producing output — MongoDB raises an error:
+
+```
+PlanExecutor error during aggregation :: caused by ::
+Exceeded memory limit for $group, but didn't allow external sort.
+Pass allowDiskUse:true to opt in.
+```
+
+The limit is per-stage, not per-pipeline. A pipeline with three stages each
+accumulating 80 MB is fine; a single `$group` accumulating 120 MB is not.
+
+## allowDiskUse
+
+The escape hatch is `allowDiskUse=True`:
+
+```python
+result = list(db.events.aggregate(
+    [
+        {"$match": {"ts": {"$gte": t_start}}},
+        {"$group": {"_id": "$user_id", "count": {"$sum": 1}}},
+        {"$sort": {"count": -1}},
+    ],
+    allowDiskUse=True,  # allow spilling to disk if RAM limit exceeded
+))
+```
+
+With `allowDiskUse=True`, stages that exceed the RAM limit spill intermediate
+state to temporary files on disk. This avoids the memory error but introduces
+I/O overhead. For large aggregations on analytics replicas (not your primary
+write path), this is the right trade-off.
+
+<Callout type="gotcha" title="allowDiskUse doesn't bypass the limit — it spills past it">
+  `allowDiskUse=True` doesn't increase the RAM limit; it allows the stage to
+  spill to disk when the limit is hit. For very large aggregations, the spill
+  can make the operation 10–100× slower than an in-memory version. If you're
+  consistently hitting the limit, the better fix is to redesign the pipeline:
+  partition the input with `$match` and run the aggregation in batches, or
+  use `$merge` to accumulate incrementally rather than loading everything into
+  a single `$group`.
+</Callout>
+
+## A worked production pattern: daily rollup
+
+Here's a complete pipeline that generates a daily revenue summary across
+regions, runs on a secondary (to avoid loading the primary), and writes the
+result atomically:
+
+```python
+from pymongo import MongoClient, ReadPreference
+from datetime import datetime, timedelta, timezone
+
+client = MongoClient("mongodb://host1,host2,host3/?replicaSet=rs0")
+
+# Run the aggregation on a secondary
+db = client.get_database(
+    "mydb",
+    read_preference=ReadPreference.SECONDARY
+)
+
+yesterday = datetime.now(tz=timezone.utc).replace(
+    hour=0, minute=0, second=0, microsecond=0
+) - timedelta(days=1)
+today = yesterday + timedelta(days=1)
+
+pipeline = [
+    # Push as much filtering as possible to the index scan
+    {"$match": {
+        "ts": {"$gte": yesterday, "$lt": today},
+        "status": "completed",
+    }},
+    # Join with the products collection for the region field
+    {"$lookup": {
+        "from": "products",
+        "localField": "product_id",
+        "foreignField": "_id",
+        "as": "product",
+    }},
+    {"$unwind": "$product"},
+    # Group by region
+    {"$group": {
+        "_id": "$product.region",
+        "revenue": {"$sum": "$amount"},
+        "order_count": {"$sum": 1},
+        "date": {"$first": yesterday},
+    }},
+    # Write atomically — full replacement each night
+    {"$out": "daily_revenue_by_region"},
+]
+
+db.orders.aggregate(pipeline, allowDiskUse=True)
+```
+
+Notice the `$match` is first (before `$lookup`), so the index on `ts` and
+`status` narrows the stream before the join happens. Without this, `$lookup`
+would join every order against `products`, including orders from all time.
+
+## Pipeline optimisation rules of thumb
+
+1. **`$match` first** — push filtering as early as possible.
+2. **`$project`/`$addFields` early** — drop fields you don't need before
+   heavier stages see them.
+3. **`$lookup` after `$match`** — minimise what gets joined.
+4. **`$sort` + `$limit` together** — a `$sort` immediately followed by
+   `$limit` is optimised by MongoDB into a "top-K sort" that only retains the
+   K smallest/largest items in memory.
+5. **`$unwind` before `$group`** — not always, but `$unwind` on a large array
+   followed by `$group` is often more efficient than `$group` with `$push`
+   followed by array operations.
+
+> The pipeline is cheap when documents are narrow and the stream is small. The
+> most expensive aggregation is one where `$group` or `$lookup` sees the entire
+> collection because a leading `$match` was missing or misplaced.

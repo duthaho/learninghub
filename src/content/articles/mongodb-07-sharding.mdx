@@ -1,0 +1,203 @@
+---
+title: "Sharding architecture"
+subtitle: "A shard key is a decision you live with forever. The choice between ranged and hashed, and between single-field and compound, determines whether you get horizontal scale or horizontal hot spots."
+description: "Ranged vs hashed shard keys, why a timestamp shard key is a hotspot, compound keys that solve both problems, jumbo chunks, and how to resolve them."
+level: "Advanced · Scale"
+accent: "#13AA52"
+readingTime: "16 min read"
+updated: 2026-11-24
+order: 58
+series: "MongoDB"
+part: 7
+---
+
+import Callout from '../../components/Callout.astro';
+
+*MongoDB deep-dive · Part 7 of 10. Previous: [Aggregation pipeline](/mongodb-06-aggregation/). Next: [Change streams & oplog tailing](/mongodb-08-change-streams/).*
+
+Sharding horizontally partitions a collection across multiple replica sets
+(called **shards**). Each shard holds a subset of the data; together they
+hold all of it. A **mongos** query router sits in front of the shards and
+routes operations to the right shard(s) based on the **shard key** — the
+field or fields by which data is partitioned.
+
+The shard key is the most consequential schema decision in a sharded MongoDB
+deployment. It is effectively permanent: changing it requires either
+`reshardCollection` (a heavyweight online operation available since MongoDB
+5.0) or a full data migration. Choose wrong, and you'll have a system that
+fails to scale horizontally despite being sharded.
+
+## Chunks
+
+MongoDB divides the shard key space into **chunks** — contiguous ranges of
+key values. Initially there is one chunk per shard; as chunks grow beyond a
+configurable maximum size (default: 128 MB), the balancer splits them and
+migrates chunks between shards to keep the distribution even.
+
+The balancer runs in the background and aims to keep the number of chunks per
+shard approximately equal. Chunk migrations are expensive (they copy data
+between shards), so the balancer is designed to run during low-traffic periods
+and to minimise migration frequency.
+
+## Ranged sharding
+
+In ranged sharding, documents are grouped into chunks by contiguous ranges of
+the shard key value. A range query on the shard key (`{ts: {$gte: t1, $lte:
+t2}}`) maps to a contiguous region of the key space and can be routed to a
+single shard (or a small number of shards) — this is called a **targeted
+query**.
+
+The problem: if the shard key is **monotonically increasing** — a timestamp,
+an auto-incrementing integer, an ObjectId — all new writes go into the latest
+chunk, which lives on one shard. The other shards sit idle while the "hot
+shard" handles all writes. This is the classic **monotonic hotspot**.
+
+```
+Shard A: ts < 2026-01-01   (historical data, cold)
+Shard B: ts < 2026-06-01   (older data, cold)
+Shard C: ts >= 2026-06-01  (all new writes — HOT)
+```
+
+## Hashed sharding
+
+In hashed sharding, MongoDB computes a hash of the shard key value and uses
+the hash to place the document. Even perfectly sequential keys produce
+uniformly distributed hashes, so writes spread evenly across all shards.
+
+The cost: a range query on the shard key no longer maps to a contiguous region
+of the hash space. It becomes a **scatter-gather query**: mongos must fan out
+to all shards and merge the results. For analytical queries that touch large
+time ranges, this is expensive.
+
+| Property | Ranged | Hashed |
+|----------|--------|--------|
+| Write distribution | Hotspot on monotonic keys | Even |
+| Targeted range queries | ✓ | ✗ (scatter-gather) |
+| Point queries on shard key | ✓ | ✓ |
+| Data locality | Yes (useful for time-series) | No |
+
+## The compound shard key solution
+
+For a time-series IoT workload — high write throughput on `{device_id,
+timestamp}` data with range queries on time — a compound shard key solves
+both problems simultaneously:
+
+```javascript
+sh.shardCollection("mydb.measurements", {"device_id": "hashed", "ts": 1})
+```
+
+The **leading field** `device_id` is hashed — write distribution is even
+across shards because device IDs are diverse. The **trailing field** `ts` is
+ranged — within a given shard, documents for the same device are ordered by
+time, so range queries on `ts` for a specific device are efficient within the
+shard.
+
+<Callout type="insight" title="Hashed leading field + ranged trailing field is the IoT sweet spot">
+  The compound shard key `{device_id: "hashed", ts: 1}` gives you:
+  - **Even write distribution** — hashed device IDs prevent any single shard
+    from becoming the write hotspot.
+  - **Efficient per-device time-range queries** — once the query is routed to
+    the right shard (via the hashed device_id), the ranged ts field lets the
+    shard satisfy the time predicate with an index scan rather than a full
+    scan.
+
+  You sacrifice cross-device time-range queries (scatter-gather), but for most
+  IoT workloads that's an acceptable trade.
+</Callout>
+
+## Jumbo chunks
+
+A **jumbo chunk** is a chunk that cannot be split further. This happens when
+all documents in the chunk share the exact same shard key value: there is no
+way to split `{device_id: "d-99"}` into two chunks because the shard key value
+is the same for every document in it, and MongoDB's range-based splitting
+requires a boundary between two distinct key values.
+
+Jumbo chunks are marked with `jumbo: true` in the chunk metadata and the
+balancer will not migrate them, because migrating a chunk that can never be
+split would only move the problem, not resolve it.
+
+<Callout type="gotcha" title="A jumbo chunk is a schema problem, not a configuration problem">
+  You can clear the `jumbo` flag (`clearJumboFlag` command), but that just
+  lets the balancer try to migrate the chunk again. If the underlying cause
+  is that too many documents share a shard key value with insufficient
+  cardinality, the flag will come back. The real fix is a higher-cardinality
+  shard key.
+</Callout>
+
+### Resolving a jumbo chunk
+
+The options, from lightest to heaviest:
+
+1. **`refineCollectionShardKey`** (MongoDB 4.4+): Adds a suffix field to the
+   existing shard key without moving any data. For example, refine
+   `{device_id}` to `{device_id, ts}`. The range boundaries are updated in
+   place. This resolves jumbo chunks caused by low-cardinality leading keys.
+
+2. **`reshardCollection`** (MongoDB 5.0+): Changes the shard key entirely
+   and redistributes all data. This is a heavyweight online operation
+   (data is copied shard-to-shard in the background while the collection
+   remains online). Use when the existing shard key is fundamentally wrong
+   and can't be patched by refinement.
+
+3. **Manual chunk distribution**: For a jumbo chunk that's large but
+   theoretically splittable (the flag was set by heuristics), you can try
+   `sh.splitAt()` to force a split at a specific boundary, then let the
+   balancer migrate the resulting chunks.
+
+```javascript
+// Check for jumbo chunks
+db.getSiblingDB("config").chunks.find({jumbo: true}).count()
+
+// Refine the shard key (adds ts as suffix without data movement)
+db.adminCommand({
+    refineCollectionShardKey: "mydb.measurements",
+    key: {device_id: 1, ts: 1}
+})
+```
+
+## Zone sharding
+
+Zones (formerly "tag-based sharding") let you pin specific shard key ranges
+to specific shards. This is useful for:
+- **Data residency**: keep EU user data on EU shards.
+- **Hot/cold tiering**: keep recent data on NVMe shards, historical data on
+  spinning disk shards.
+
+```javascript
+// Label shards
+sh.addShardTag("shard0", "EU")
+sh.addShardTag("shard1", "EU")
+sh.addShardTag("shard2", "US")
+
+// Pin the EU user key range to EU shards
+sh.addTagRange("mydb.users",
+    {region: "EU", _id: MinKey},
+    {region: "EU", _id: MaxKey},
+    "EU"
+)
+```
+
+## Connection routing in a sharded cluster
+
+Application code connects to `mongos`, not to individual shards. The shard key
+value in each operation determines whether mongos can route it to a single
+shard (targeted) or must fan out to all shards (scatter-gather):
+
+```python
+# Targeted — shard key (device_id) is in the query
+db.measurements.find({"device_id": "d-42", "ts": {"$gte": t1}})
+
+# Scatter-gather — shard key not in query, mongos asks every shard
+db.measurements.find({"ts": {"$gte": t1}})
+```
+
+Always include the shard key (or its prefix, for compound keys) in queries
+that need to be targeted. A scatter-gather query on a large sharded collection
+is equivalent to running that query on every shard in parallel — it scales
+out in a different way, but it doesn't get cheaper per-shard.
+
+> The shard key choice is permanent enough to treat as schema design. For
+> time-series workloads, a compound key with a hashed high-cardinality leading
+> field solves the monotonic hotspot. For jumbo chunks, `refineCollectionShardKey`
+> is the surgical fix; `reshardCollection` is the last resort.

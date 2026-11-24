@@ -1,0 +1,233 @@
+---
+title: "Indexes in depth"
+subtitle: "An index is a bet you place at write-time that you'll win at query-time. The ESR rule tells you which bet to place."
+description: "Compound vs single-field indexes, the ESR rule, covered queries, and the Python projection trick that eliminates the FETCH stage entirely."
+level: "Intermediate · Performance"
+accent: "#13AA52"
+readingTime: "14 min read"
+updated: 2026-11-24
+order: 52
+series: "MongoDB"
+part: 1
+---
+
+import Callout from '../../components/Callout.astro';
+
+*MongoDB deep-dive · Part 1 of 10. Previous: [Series intro](/mongodb-00-series-intro/). Next: [Reading execution plans](/mongodb-02-execution-plans/).*
+
+An index is a sorted copy of a subset of your data, maintained automatically by
+the storage engine so that queries don't need to walk every document in a
+collection to satisfy a predicate. That's the whole story — the entire
+complexity of this topic is in the word *sorted* and in knowing which subset to
+keep.
+
+## Why three single-field indexes are not the same as one compound index
+
+Suppose you have an `events` collection and your application runs a query like
+this constantly:
+
+```python
+db.events.find(
+    {"user_id": "u-42", "status": "active", "region": "ap-southeast-1"},
+    {"_id": 0, "ts": 1, "payload": 1}
+)
+```
+
+One approach: create three separate single-field indexes — one on `user_id`,
+one on `status`, one on `region`. MongoDB's query planner can use at most one
+index per query stage unless you explicitly use `$or` with multiple branches.
+In practice it will pick the most selective single field, scan that index to
+get a candidate document set, and then filter the candidates against the
+remaining predicates. The other two indexes are unused for this query.
+
+The compound index `{user_id: 1, status: 1, region: 1}` changes everything.
+The planner traverses the B-tree using all three fields simultaneously, landing
+directly on the matching subset. Zero redundant documents are visited from the
+index perspective. The query goes from "index on one field + filter on two" to
+"index on all three fields."
+
+## The ESR rule
+
+Order inside a compound index matters, and the rule that governs it is **ESR:
+Equality → Sort → Range**.
+
+- **E — Equality fields first.** Put fields you test with `{$eq: ...}` or a
+  plain equality match at the beginning. Equality filters collapse the B-tree
+  search to a single subtree immediately.
+- **S — Sort fields next.** Put fields that appear in `.sort()` after the
+  equality fields. When sort fields are contiguous and in the same order as the
+  sort specification, MongoDB can satisfy the sort from the index without loading
+  documents into memory and sorting them.
+- **R — Range fields last.** Fields tested with `$gt`, `$lt`, `$gte`, `$lte`,
+  `$in`, `$regex`, etc. go at the end. A range predicate on the index expands
+  the matched region in the B-tree; pushing it to the end minimises how much
+  the range expands over the prefix established by equality and sort fields.
+
+Concrete example. The query:
+
+```python
+db.orders.find(
+    {"customer_id": "c-99", "ts": {"$gte": t_start, "$lte": t_end}}
+).sort("amount", -1)
+```
+
+has one equality field (`customer_id`), one sort field (`amount`), and one
+range field (`ts`). ESR says the index should be:
+
+```python
+db.orders.create_index([
+    ("customer_id", 1),  # E
+    ("amount", -1),       # S — matches sort direction
+    ("ts", 1),            # R
+])
+```
+
+If you invert the sort and range fields — `{customer_id, ts, amount}` — the
+sort can no longer be served from the index after a range boundary, and MongoDB
+falls back to an in-memory `SORT` stage. This is not catastrophic, but it burns
+RAM and CPU for every query, and once the working set grows large enough it
+spills to disk.
+
+<Callout type="gotcha" title="ESR violations show up as SORT in explain(), not as high document counts">
+  When people look at a slow query and check `explain()`, they look for a high
+  `totalDocsExamined`/`nReturned` ratio. But a SORT violation doesn't inflate
+  that ratio — it shows up as a `SORT` stage in the winning plan with
+  `memUsage` populated. The CPU cost is in the sort, not the scan. If you're
+  not looking for `SORT` explicitly, you can miss the most expensive part of
+  the plan.
+</Callout>
+
+## Index prefixes
+
+A compound index on `{a, b, c}` automatically covers queries on `{a}`, `{a,
+b}`, and `{a, b, c}` — these are its **prefixes**. It does not cover queries on
+`{b}`, `{c}`, or `{b, c}` alone, because the leading key `a` isn't
+constrained and the index cannot be entered at the right level. This is why a
+well-designed compound index can often replace several single-field indexes.
+
+The practical rule: before creating a new single-field index, check whether an
+existing compound index has the field as an unused prefix position. Creating
+the single-field index anyway wastes write amplification.
+
+## Covered queries
+
+A query is **covered** when both conditions hold:
+
+1. All fields in the query predicate are part of the index.
+2. All fields in the **projection** (what the query returns) are part of the index.
+
+When a query is covered, MongoDB can answer it entirely from the index without
+loading a single document from the collection. The B-tree has everything
+needed: the keys give the predicate match, and those same keys are what the
+projection returns.
+
+<Callout type="insight" title="A covered query has zero FETCH stage — the index is the document">
+  The winning plan for a covered query shows only `IXSCAN` with no `FETCH`
+  stage after it. That's the signal. If you see `IXSCAN → FETCH`, the query
+  is not covered and MongoDB is loading full documents. Sometimes that's
+  unavoidable; often it's a projection issue.
+</Callout>
+
+The critical subtlety: `_id` breaks coverage unless you explicitly exclude it.
+`_id` is not part of your compound index (usually), so a projection that
+includes it — which is the MongoDB default — forces a FETCH stage to retrieve
+the `_id` from the document. Always project `_id: 0` when you want coverage:
+
+```python
+from pymongo import MongoClient, ASCENDING, DESCENDING
+
+client = MongoClient()
+db = client.mydb
+col = db.events
+
+# Create the covering index
+col.create_index([
+    ("user_id", ASCENDING),
+    ("status", ASCENDING),
+    ("ts", DESCENDING),
+])
+
+# This query is NOT covered — _id is included by default
+results = col.find(
+    {"user_id": "u-42", "status": "active"},
+    {"ts": 1}             # returns _id + ts → FETCH stage needed for _id
+)
+
+# This query IS covered — _id explicitly excluded
+results = col.find(
+    {"user_id": "u-42", "status": "active"},
+    {"_id": 0, "ts": 1}   # only indexed fields → pure IXSCAN
+)
+```
+
+## Verifying coverage with explain()
+
+```python
+plan = col.find(
+    {"user_id": "u-42", "status": "active"},
+    {"_id": 0, "ts": 1}
+).explain("executionStats")
+
+winning_plan = plan["queryPlanner"]["winningPlan"]
+exec_stats   = plan["executionStats"]
+
+print(winning_plan)          # look for IXSCAN with no FETCH child
+print(exec_stats["totalDocsExamined"])  # 0 for a fully covered query
+```
+
+If `totalDocsExamined` is `0` and the winning plan contains only `IXSCAN`, the
+query is covered. Any non-zero `totalDocsExamined` means documents were loaded
+— which is fine when unavoidable, but should be a deliberate choice.
+
+## Forcing an index with hint()
+
+The query planner picks the index it believes is best based on cached plans. If
+you know better — common when benchmarking or when the planner has an outdated
+cached plan — force it:
+
+```python
+col.find(
+    {"user_id": "u-42", "status": "active"},
+    {"_id": 0, "ts": 1}
+).hint([("user_id", ASCENDING), ("status", ASCENDING), ("ts", DESCENDING)])
+```
+
+`hint()` takes the same format as `create_index()`. Using an index name string
+also works: `.hint("user_id_1_status_1_ts_-1")`.
+
+<Callout type="note" title="Don't leave hint() calls in production queries">
+  `hint()` bypasses the planner entirely — including future improvements. It's
+  the right tool for benchmarking and diagnosing plan-cache problems, but a
+  left-in hint will silently ignore a better index you add later. Remove it once
+  you've confirmed the index is being selected correctly without it.
+</Callout>
+
+## Multikey indexes
+
+When you index a field whose value is an array, MongoDB creates a **multikey
+index**: one index entry per array element. This lets you query inside arrays
+efficiently (`{"tags": "mongodb"}`), but it comes with a constraint: a compound
+index can only have **one** array-valued field. Trying to index two array
+fields together raises an error. Plan your schema accordingly.
+
+## Index builds in production
+
+Building an index on a large collection is an I/O-intensive operation. Since
+MongoDB 4.2, all index builds are **rolling with an intentional lock strategy**
+— the build runs in the background and acquires only short-duration locks for
+start and commit, keeping the collection available for reads and writes
+throughout. The main cost is the initial scan plus the write amplification until
+the build finishes. Watch `db.currentOp()` during the build: each index build
+appears as a long-running operation with `msg: "Index Build"`.
+
+## What to carry forward
+
+The rules compound: ESR tells you the order, prefix awareness tells you when
+not to create a new index, and covered queries tell you what to project. These
+three heuristics together explain the behaviour of almost every index-related
+performance problem you'll encounter. Part 2 shows you how to read the evidence
+directly in an `explain()` output.
+
+> An index on `{a, b, c}` does not behave like three indexes. The order inside
+> the compound index is part of its definition — ESR is not a suggestion, it's
+> the difference between a 2ms query and an in-memory sort.

@@ -1,0 +1,66 @@
+---
+title: "The MongoDB series: start here"
+subtitle: "Ten deep-dives that build the mental model you need to run, tune, and scale MongoDB in production."
+description: "A guide to the ten-part MongoDB deep-dive series: indexes, execution plans, write concerns, replica sets, read preferences, aggregation, sharding, change streams, backup, and observability."
+level: "Production · Series guide"
+accent: "#13AA52"
+readingTime: "4 min read"
+updated: 2026-11-24
+order: 51
+series: "MongoDB"
+part: 0
+---
+
+Most MongoDB tutorials end where the hard problems begin: the basics of CRUD
+feel approachable, but the day you need to explain why a query is slow, choose
+a shard key, or recover from a bad write at 2am — that's when the gaps show.
+
+This series fills those gaps. It is built around **the decisions and trade-offs
+that production deployments force on you**, not a walkthrough of the driver API.
+The examples are in Python and PyMongo throughout — not because other stacks
+don't matter, but because concrete code is clearer than pseudo-code, and the
+patterns generalise directly.
+
+## The ten parts
+
+1. **[Indexes deep dive](/mongodb-01-indexes/)** — compound vs single-field, the ESR rule, what a "covered query" actually means, and the Python snippets that make the difference visible in `explain()`.
+
+2. **[Reading execution plans](/mongodb-02-execution-plans/)** — `explain()` output anatomy, how to tell a healthy plan from a slow one, the `FETCH` stage and what to do about it, and the one metric people misread.
+
+3. **[Write concerns & read concerns](/mongodb-03-write-read-concerns/)** — what `w:"majority"` with `j:true` actually guarantees, the voting-node detail that bites operators, and when `linearizable` read concern is worth its latency.
+
+4. **[Replica sets & elections](/mongodb-04-replica-sets/)** — heartbeats, the pv1 election protocol, the pre-vote phase, what happens second-by-second when the primary dies, and what retryable writes do (and don't) cover.
+
+5. **[Read preferences](/mongodb-05-read-preferences/)** — the five modes, `maxStalenessSeconds` and its 90-second floor, the read-your-own-writes trap with `nearest`, and Python configuration that gets each scenario right.
+
+6. **[Aggregation pipeline for ops](/mongodb-06-aggregation/)** — `$lookup`, `$group`, `$merge` vs `$out`, the 100 MB per-stage RAM limit, `allowDiskUse`, and why `$out` is right for nightly rebuilds and `$merge` is right for incremental updates.
+
+7. **[Sharding architecture](/mongodb-07-sharding/)** — ranged vs hashed shard keys, why a timestamp shard key is a hotspot waiting to happen, compound keys that solve both problems, jumbo chunks and how to resolve them.
+
+8. **[Change streams & oplog tailing](/mongodb-08-change-streams/)** — `watch()` and resume tokens, the at-least-once delivery pattern (and why save-before-process is the wrong call), `startAtOperationTime`, and the oplog window caveat.
+
+9. **[Backup & point-in-time recovery](/mongodb-09-backup/)** — `mongodump --oplog`, `mongorestore --oplogReplay --oplogLimit`, what logical backup silently misses that a filesystem snapshot captures, and the sharded-cluster caveat.
+
+10. **[Monitoring & security hardening](/mongodb-10-monitoring/)** — the four signals to check when latency spikes, `$currentOp`, the database profiler, WiredTiger cache eviction, and the minimum-privilege RBAC pattern for a Python service.
+
+## How to read it
+
+**Parts 1–2** are the foundation. If you can read an `explain()` output and
+know what an ESR violation means, every performance conversation you have about
+MongoDB will be more concrete. Don't skip them even if they feel familiar.
+
+**Parts 3–5** are the distributed-systems layer: durability, consistency, and
+where reads come from. This is where most "mysterious data-loss" and "stale
+read" incidents live.
+
+**Parts 6–7** are scale: aggregation that doesn't OOM, and sharding that doesn't
+create hotspots. Part 6 is relevant long before you shard; Part 7 matters the
+moment you do.
+
+**Parts 8–10** are the operational muscle: real-time event processing that
+survives crashes, backup that works under pressure, and observability tight
+enough to diagnose a latency spike before the second PagerDuty alert fires.
+
+> Everything version-sensitive here was checked against **MongoDB 9.0**
+> (current stable as of late 2026). Core concepts are stable across 7.x, 8.x,
+> and 9.x. Start with [Part 1](/mongodb-01-indexes/).

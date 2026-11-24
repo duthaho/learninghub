@@ -1,0 +1,252 @@
+---
+title: "Change streams & oplog tailing"
+subtitle: "Change streams are a promise: every mutation, in order, exactly once — if you hold up your end of the contract. The contract is about when you save the resume token."
+description: "watch() and resume tokens, at-least-once delivery (why process-then-save is correct), startAtOperationTime, and the oplog window caveat."
+level: "Intermediate · Event-Driven"
+accent: "#13AA52"
+readingTime: "14 min read"
+updated: 2026-11-24
+order: 59
+series: "MongoDB"
+part: 8
+---
+
+import Callout from '../../components/Callout.astro';
+
+*MongoDB deep-dive · Part 8 of 10. Previous: [Sharding architecture](/mongodb-07-sharding/). Next: [Backup & point-in-time recovery](/mongodb-09-backup/).*
+
+Change streams give your application a real-time feed of mutations to a
+collection (or database, or entire cluster) without requiring direct oplog
+access. They're built on top of the oplog and surfaced through a stable,
+resumable cursor API that abstracts away replica set topology, failovers, and
+oplog internals.
+
+The core abstraction: `watch()` returns a cursor. You iterate it. Each
+iteration yields a **change event** describing a mutation. If your process
+crashes and restarts, you tell the cursor where you left off using a **resume
+token**, and you pick up without gaps.
+
+Getting the resume token contract right is the most important thing in this
+article.
+
+## Basic usage
+
+```python
+from pymongo import MongoClient
+
+client = MongoClient("mongodb://host1,host2,host3/?replicaSet=rs0")
+col = client.mydb.orders
+
+# Watch all changes to the orders collection
+with col.watch() as stream:
+    for change in stream:
+        print(change["operationType"], change["documentKey"]["_id"])
+```
+
+Each `change` document looks like:
+
+```json
+{
+  "_id": {"_data": "82..."},          // resume token
+  "operationType": "insert",
+  "ns": {"db": "mydb", "coll": "orders"},
+  "documentKey": {"_id": "o-100"},
+  "fullDocument": {"_id": "o-100", "amount": 99.99, ...}
+}
+```
+
+The `_id` of each change event is the **resume token** for that position in
+the oplog. Store it; use it to resume after a crash.
+
+## Resume tokens
+
+The resume token is an **opaque** value — its internal structure is an
+implementation detail that has changed across MongoDB versions. Never parse or
+construct one yourself. Treat it as a black box that you persist and hand back
+to `watch()`.
+
+```python
+import json
+from pathlib import Path
+
+TOKEN_FILE = Path("/var/lib/myapp/change_stream_token.json")
+
+def load_token():
+    if TOKEN_FILE.exists():
+        return json.loads(TOKEN_FILE.read_text())
+    return None
+
+def save_token(token):
+    TOKEN_FILE.write_text(json.dumps(token))
+
+resume_token = load_token()
+
+# resume_after= is a keyword argument — not a positional dict
+with col.watch(resume_after=resume_token) as stream:
+    for change in stream:
+        # 1. PROCESS the event (business logic)
+        process_event(change)
+        # 2. SAVE the token AFTER successful processing
+        save_token(change["_id"])
+```
+
+<Callout type="gotcha" title="Save the resume token AFTER processing, not before">
+  The order matters for delivery semantics:
+
+  - **Process-then-save** = **at-least-once delivery**. If the process crashes
+    after processing but before saving the token, you'll re-process that event
+    on the next startup. Your `process_event` function must be idempotent, but
+    you will never miss an event.
+
+  - **Save-then-process** = **at-most-once delivery**. If the process crashes
+    after saving the token but before processing the event, that event is
+    skipped on the next startup — you resume *past* it. This is a silent data
+    loss bug. For most event-driven workflows (payment processing, inventory
+    updates, audit logs), silent skipping is a critical failure.
+
+  At-least-once with idempotent processing is the correct default. At-most-once
+  is only correct for genuinely disposable events where duplication is a larger
+  problem than loss.
+</Callout>
+
+<Callout type="note" title="watch() uses resume_after= as a keyword argument">
+  In PyMongo, `watch()` takes `resume_after` as a keyword argument:
+  ```python
+  col.watch(resume_after=token)        # correct
+  col.watch({"resume_after": token})   # wrong — passes a pipeline stage
+  ```
+  Passing a dict as the first positional argument to `watch()` sets the
+  aggregation pipeline, not a resume token. The resume token would be silently
+  ignored, and the stream would start from the current position.
+</Callout>
+
+## startAfter vs resumeAfter
+
+`resume_after` resumes from a token that was produced by a prior `watch()` on
+this collection. `start_after` is similar but can resume from an **invalidate
+event** token (the event emitted when a watched collection is dropped or
+renamed). Use `start_after` if your change stream watches a collection that
+might be dropped and you want to resume processing from the token before the
+drop:
+
+```python
+col.watch(start_after=token)
+```
+
+For normal crash recovery, `resume_after` is correct.
+
+## startAtOperationTime
+
+Both `resume_after` and `start_after` require a token from a previous change
+stream run. What if you don't have a token — for example, you're replaying
+changes from a point in time corresponding to a backup?
+
+```python
+from bson import Timestamp
+
+# Start the change stream from the moment of a backup
+backup_time = Timestamp(1732492800, 1)  # Unix timestamp + ordinal
+
+with col.watch(start_at_operation_time=backup_time) as stream:
+    for change in stream:
+        process_event(change)
+        save_token(change["_id"])
+```
+
+`startAtOperationTime` lets you open a change stream starting at a specific
+cluster time, even without a prior resume token. The common use case: you've
+restored a backup to time T and want to replay all changes since T to bring
+the restored state up to date without re-processing changes from before the
+backup.
+
+<Callout type="insight" title="startAtOperationTime + backup restore = point-in-time recovery at the application level">
+  Pairing `mongorestore` (Part 9) with `startAtOperationTime` on a change
+  stream gives you an application-level PITR workflow: restore the logical
+  backup to time T, then replay events from T to now via the change stream.
+  This is lighter than oplog replay for applications that maintain their own
+  state derived from the event stream.
+</Callout>
+
+## Filtering the change stream
+
+`watch()` accepts an aggregation pipeline that filters or transforms the change
+events before they reach your code. Only a subset of stages are allowed
+(`$match`, `$project`, `$addFields`, `$replaceRoot`, `$replaceWith`), but
+`$match` is the most useful:
+
+```python
+# Only watch for completed orders
+with col.watch([
+    {"$match": {
+        "operationType": {"$in": ["insert", "update"]},
+        "fullDocument.status": "completed",
+    }}
+]) as stream:
+    for change in stream:
+        process_completed_order(change)
+        save_token(change["_id"])
+```
+
+<Callout type="note" title="fullDocument is populated on insert; use fullDocumentBeforeChange for updates">
+  For `insert` events, `fullDocument` contains the full inserted document.
+  For `update` events, `fullDocument` is populated only if
+  `fullDocument="updateLookup"` is passed to `watch()` — otherwise it only
+  contains the delta. For the before-update state, `fullDocumentBeforeChange`
+  requires `fullDocumentBeforeChange="whenAvailable"` and MongoDB 6.0+.
+</Callout>
+
+## The oplog window
+
+Change streams are backed by the oplog. The resume token points to a position
+in the oplog. If your change stream consumer falls behind and the oplog wraps
+around past your last token position, the stream **cannot resume** — the
+history it needs is gone. MongoDB raises a `ChangeStreamHistoryLost` error.
+
+The oplog is a capped collection. Its window is determined by its configured
+size and your write rate. With a 50 GB oplog and 100 MB/s write throughput,
+the window is roughly 500 seconds — just over 8 minutes. If your consumer
+stops for longer than the oplog window, you need to re-snapshot and restart.
+
+```python
+import pymongo.errors
+
+with col.watch(resume_after=last_token) as stream:
+    try:
+        for change in stream:
+            process_event(change)
+            save_token(change["_id"])
+    except pymongo.errors.PyMongoError as e:
+        if "ChangeStreamHistoryLost" in str(e):
+            # The oplog window has passed — must resync from scratch
+            handle_history_lost()
+        raise
+```
+
+**Mitigation:** size the oplog generously on write-heavy clusters, and alert
+early when your consumer lag approaches a threshold (e.g., > 50% of the oplog
+window). `rs.printReplicationInfo()` shows the oplog window in hours for each
+member.
+
+## Watching at higher scopes
+
+Change streams can be opened at three scopes:
+
+```python
+# Collection scope (most common)
+col.watch()
+
+# Database scope — all collections in the database
+db.watch()
+
+# Cluster scope — all databases and collections
+client.watch()
+```
+
+Cluster-level change streams are powerful for audit logging and ETL pipelines,
+but they produce much higher event volumes. Always filter with a `$match` stage
+when watching at cluster scope.
+
+> The resume token is a contract: you hold up your end by processing before
+> saving. At-least-once with idempotent processing is the correct default —
+> at-most-once silently drops events, and in an event-driven system, silence is
+> the worst failure mode.
