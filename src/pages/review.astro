@@ -41,7 +41,7 @@ const seriesNames = [...new Set(deck.map((c) => c.series))];
       are at the end of each article on the <a href={base}>map</a>.</p>
     </noscript>
 
-    <div class="panel" id="review-app" hidden>
+    <div class="review-panel" id="review-app" hidden>
       <div class="controls">
         <label class="filter">
           <span class="filter-label">Line</span>
@@ -209,6 +209,8 @@ const seriesNames = [...new Set(deck.map((c) => c.series))];
 
   <style>
     .review-page { padding: clamp(3rem, 7vw, 5rem) 0 4rem; }
+    /* .btn/.grades set display:flex, which defeats the hidden attribute */
+    .review-page [hidden] { display: none !important; }
     .review-head h1 {
       font-size: clamp(2.2rem, 4.6vw + 0.5rem, 3.6rem);
       line-height: 1.06;
@@ -224,7 +226,7 @@ const seriesNames = [...new Set(deck.map((c) => c.series))];
     }
     .noscript { margin-top: 2rem; color: var(--ink-soft); }
 
-    .panel { margin-top: 2.6rem; border-top: 3px double var(--line-strong); }
+    .review-panel { margin-top: 2.6rem; border-top: 3px double var(--line-strong); }
 
     .controls {
       display: flex;
